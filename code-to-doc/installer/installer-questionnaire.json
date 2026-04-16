@@ -1,0 +1,116 @@
+{
+  "installer_version": "1.0",
+  "name": "code-to-doc",
+  "phases": [
+    {
+      "id": "confirm-install",
+      "title": "Confirm code-to-doc install",
+      "questions": [
+        {
+          "key": "install_enabled",
+          "type": "boolean",
+          "label": "Install the code-to-doc system on this OpenClaw deployment?",
+          "required": true,
+          "default": true
+        },
+        {
+          "key": "use_default_agents",
+          "type": "boolean",
+          "label": "Use the default 4-agent code-to-doc setup?",
+          "required": true,
+          "default": true
+        }
+      ]
+    },
+    {
+      "id": "github-auth",
+      "title": "GitHub authentication",
+      "questions": [
+        {
+          "key": "github_app_id",
+          "type": "string",
+          "label": "GitHub App ID",
+          "required": true
+        },
+        {
+          "key": "github_installation_id",
+          "type": "string",
+          "label": "GitHub Installation ID",
+          "required": true
+        },
+        {
+          "key": "github_app_private_key_file",
+          "type": "path",
+          "label": "Path to GitHub App PEM file",
+          "required": true,
+          "default": "~/.openclaw/credentials/github-app.pem"
+        }
+      ]
+    },
+    {
+      "id": "repos",
+      "title": "Source and docs repos",
+      "questions": [
+        {
+          "key": "scanner_repos",
+          "type": "string[]",
+          "label": "Source repos to scan ({owner}/{repo})",
+          "required": true
+        },
+        {
+          "key": "docs_repo",
+          "type": "string",
+          "label": "Docs target repo ({owner}/{repo})",
+          "required": true
+        },
+        {
+          "key": "docs_base_path",
+          "type": "string",
+          "label": "Docs base path",
+          "required": true,
+          "default": "."
+        },
+        {
+          "key": "default_branch",
+          "type": "string",
+          "label": "Default branch",
+          "required": true,
+          "default": "main"
+        },
+        {
+          "key": "lookback_hours",
+          "type": "number",
+          "label": "Lookback hours for initial scan",
+          "required": true,
+          "default": 168
+        }
+      ]
+    },
+    {
+      "id": "runtime-paths",
+      "title": "Workspace and shared state",
+      "questions": [
+        {
+          "key": "use_standard_paths",
+          "type": "boolean",
+          "label": "Use standard OpenClaw paths for shared state and credentials?",
+          "required": true,
+          "default": true
+        }
+      ]
+    },
+    {
+      "id": "first-run",
+      "title": "First run",
+      "questions": [
+        {
+          "key": "run_after_install",
+          "type": "boolean",
+          "label": "Run the full code-to-doc system after validation?",
+          "required": true,
+          "default": false
+        }
+      ]
+    }
+  ]
+}
