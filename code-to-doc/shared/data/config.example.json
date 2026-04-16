@@ -1,0 +1,12 @@
+{
+  "scanner": {
+    "repos": ["owner/source-repo"],
+    "defaultBranch": "main",
+    "lookbackHours": 168
+  },
+  "docs": {
+    "repo": "owner/docs-repo",
+    "basePath": ".",
+    "defaultBranch": "main"
+  }
+}
