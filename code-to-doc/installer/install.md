@@ -27,14 +27,19 @@ If yes, continue.
 Ask:
 - GitHub App ID
 - GitHub Installation ID
-- Path to GitHub App private key PEM, or whether the installer should create the standard credentials path and tell the user where to place it
+- Paste the GitHub App private key (PEM content) — installer writes it to `~/.openclaw/credentials/github-app.pem` with `chmod 600`
 
 Validate:
 - required values are present
-- PEM path exists if user says it already exists
+- PEM content has valid `-----BEGIN`/`-----END PRIVATE KEY-----` markers
 - permissions expectation is understood:
   - pull requests: read
   - contents: read/write
+
+Wire natively (no shell env needed):
+- Write collected values to `~/.openclaw/secrets.json` (`chmod 600`)
+- Register a `file` secrets provider (`filemain`) in `openclaw.json` pointing at that file
+- Add SecretRef `env` blocks to the agents that call GitHub (`change-scanner`, `doc-publisher`) so the gateway resolves `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY_FILE` at activation
 
 ### Phase 3: Source and docs repos
 
