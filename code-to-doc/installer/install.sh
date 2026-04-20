@@ -231,9 +231,6 @@ const desiredAgents = [
   { id: 'doc-publisher',   workspace: path.join(openclawRoot, 'agents', 'doc-publisher') },
 ];
 
-// Agents that actually call GitHub. Least privilege: don't wire creds into others.
-const githubAgents = new Set(['change-scanner', 'doc-publisher']);
-
 const githubEnvRefs = {
   GITHUB_APP_ID:               { source: 'file', provider: 'filemain', id: '/github/appId' },
   GITHUB_INSTALLATION_ID:      { source: 'file', provider: 'filemain', id: '/github/installationId' },
@@ -282,15 +279,28 @@ for (const desired of desiredAgents) {
     config.agents.list.push(entry);
     console.log(`  Added agent: ${desired.id}`);
   }
+  // Defensive cleanup — a prior installer version wrote SecretRefs into
+  // agents.list[i].env, which OpenClaw's schema rejects. Strip it so re-runs
+  // repair configs left in that bad state.
+  if ('env' in entry) {
+    delete entry.env;
+    console.log(`  Removed invalid env block from agent: ${desired.id}`);
+  }
+}
 
-  if (githubAgents.has(desired.id)) {
-    if (!entry.env || typeof entry.env !== 'object') entry.env = {};
-    for (const [k, v] of Object.entries(githubEnvRefs)) {
-      if (JSON.stringify(entry.env[k]) !== JSON.stringify(v)) {
-        entry.env[k] = v;
-        console.log(`  Wired ${k} into ${desired.id}.env`);
-      }
-    }
+// --- wire GitHub SecretRefs into the github-tools skill env block ---
+// Per OpenClaw schema, per-skill env (at skills.entries["<skill>"].env) is the
+// documented surface for injecting env vars into skill processes.
+if (!config.skills) config.skills = {};
+if (!config.skills.entries) config.skills.entries = {};
+if (!config.skills.entries['github-tools']) config.skills.entries['github-tools'] = { enabled: true };
+const ghSkill = config.skills.entries['github-tools'];
+if (ghSkill.enabled !== true) ghSkill.enabled = true;
+if (!ghSkill.env || typeof ghSkill.env !== 'object') ghSkill.env = {};
+for (const [k, v] of Object.entries(githubEnvRefs)) {
+  if (JSON.stringify(ghSkill.env[k]) !== JSON.stringify(v)) {
+    ghSkill.env[k] = v;
+    console.log(`  Wired ${k} into skills.entries["github-tools"].env`);
   }
 }
 
