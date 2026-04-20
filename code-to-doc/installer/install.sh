@@ -146,16 +146,13 @@ done
 
 CREDENTIALS_DIR="$OPENCLAW_ROOT/credentials"
 PEM_PATH="$CREDENTIALS_DIR/github-app.pem"
-SECRETS_PATH="$OPENCLAW_ROOT/secrets.json"
 
 GITHUB_APP_ID_VAL=""
 GITHUB_INSTALLATION_ID_VAL=""
-SKIP_CREDS_UPDATE=0
 
-if [ -f "$PEM_PATH" ] && [ -f "$SECRETS_PATH" ]; then
-  ok "GitHub App credentials already configured ($PEM_PATH, $SECRETS_PATH)"
-  info "To rotate, remove $PEM_PATH and $SECRETS_PATH, then re-run the installer."
-  SKIP_CREDS_UPDATE=1
+if [ -f "$PEM_PATH" ]; then
+  ok "GitHub App PEM already at $PEM_PATH — skipping credential prompt"
+  info "To rotate, remove $PEM_PATH and re-run the installer."
 else
   info "Setting up GitHub App credentials..."
   mkdir -p "$CREDENTIALS_DIR"
@@ -190,7 +187,7 @@ else
   ok "Wrote PEM to $PEM_PATH (chmod 600)"
 fi
 
-# --- 6. register agents, secrets provider, and SecretRefs in openclaw.json ---
+# --- 6. register agents and GitHub env in openclaw.json ---
 
 info "Registering agents in openclaw.json..."
 
@@ -204,25 +201,23 @@ BACKUP_PATH="$CONFIG_PATH.bak.$$"
 cp "$CONFIG_PATH" "$BACKUP_PATH"
 info "Backed up openclaw.json to $BACKUP_PATH"
 
-# Node script: upserts agents, secrets provider, per-agent SecretRef env blocks,
-# and (if new creds collected) writes ~/.openclaw/secrets.json.
+# Node script: upserts agents, top-level env with GitHub App values,
+# agent-to-agent allowlist, and cleans up stale blocks from prior attempts.
 # Does NOT remove other agents or touch agents/main.
 if OPENCLAW_ROOT="$OPENCLAW_ROOT" \
    CONFIG_PATH="$CONFIG_PATH" \
-   SECRETS_PATH="$SECRETS_PATH" \
    PEM_PATH="$PEM_PATH" \
    GITHUB_APP_ID_VAL="$GITHUB_APP_ID_VAL" \
    GITHUB_INSTALLATION_ID_VAL="$GITHUB_INSTALLATION_ID_VAL" \
-   SKIP_CREDS_UPDATE="$SKIP_CREDS_UPDATE" \
    node <<'NODE'
 const fs = require('fs');
 const path = require('path');
 
 const openclawRoot = process.env.OPENCLAW_ROOT;
 const configPath = process.env.CONFIG_PATH;
-const secretsPath = process.env.SECRETS_PATH;
 const pemPath = process.env.PEM_PATH;
-const skipCreds = process.env.SKIP_CREDS_UPDATE === '1';
+const appIdVal = process.env.GITHUB_APP_ID_VAL;
+const installIdVal = process.env.GITHUB_INSTALLATION_ID_VAL;
 
 const desiredAgents = [
   { id: 'orchestrator',    workspace: path.join(openclawRoot, 'agents', 'orchestrator') },
@@ -231,39 +226,8 @@ const desiredAgents = [
   { id: 'doc-publisher',   workspace: path.join(openclawRoot, 'agents', 'doc-publisher') },
 ];
 
-const githubEnvRefs = {
-  GITHUB_APP_ID:               { source: 'file', provider: 'filemain', id: '/github/appId' },
-  GITHUB_INSTALLATION_ID:      { source: 'file', provider: 'filemain', id: '/github/installationId' },
-  GITHUB_APP_PRIVATE_KEY_FILE: { source: 'file', provider: 'filemain', id: '/github/pemPath' },
-};
-
 const raw = fs.readFileSync(configPath, 'utf8');
 const config = JSON.parse(raw);
-
-// --- merge ~/.openclaw/secrets.json with collected values ---
-if (!skipCreds) {
-  let secrets = {};
-  if (fs.existsSync(secretsPath)) {
-    try { secrets = JSON.parse(fs.readFileSync(secretsPath, 'utf8')); } catch (_) { secrets = {}; }
-  }
-  if (!secrets.github || typeof secrets.github !== 'object') secrets.github = {};
-  secrets.github.appId = process.env.GITHUB_APP_ID_VAL;
-  secrets.github.installationId = process.env.GITHUB_INSTALLATION_ID_VAL;
-  secrets.github.pemPath = pemPath;
-  fs.writeFileSync(secretsPath, JSON.stringify(secrets, null, 2) + '\n', { mode: 0o600 });
-  fs.chmodSync(secretsPath, 0o600);
-  console.log(`  Wrote ${secretsPath} (chmod 600)`);
-}
-
-// --- register the filemain secrets provider ---
-if (!config.secrets) config.secrets = {};
-if (!config.secrets.providers) config.secrets.providers = {};
-const desiredProvider = { source: 'file', path: secretsPath, mode: 'json' };
-const existingProvider = config.secrets.providers.filemain;
-if (JSON.stringify(existingProvider) !== JSON.stringify(desiredProvider)) {
-  config.secrets.providers.filemain = desiredProvider;
-  console.log('  Registered secrets provider: filemain');
-}
 
 // --- upsert agents.list keyed by id ---
 if (!config.agents) config.agents = {};
@@ -288,20 +252,45 @@ for (const desired of desiredAgents) {
   }
 }
 
-// --- wire GitHub SecretRefs into the github-tools skill env block ---
-// Per OpenClaw schema, per-skill env (at skills.entries["<skill>"].env) is the
-// documented surface for injecting env vars into skill processes.
-if (!config.skills) config.skills = {};
-if (!config.skills.entries) config.skills.entries = {};
-if (!config.skills.entries['github-tools']) config.skills.entries['github-tools'] = { enabled: true };
-const ghSkill = config.skills.entries['github-tools'];
-if (ghSkill.enabled !== true) ghSkill.enabled = true;
-if (!ghSkill.env || typeof ghSkill.env !== 'object') ghSkill.env = {};
-for (const [k, v] of Object.entries(githubEnvRefs)) {
-  if (JSON.stringify(ghSkill.env[k]) !== JSON.stringify(v)) {
-    ghSkill.env[k] = v;
-    console.log(`  Wired ${k} into skills.entries["github-tools"].env`);
+// --- set GitHub App values in top-level env as plain strings ---
+if (!config.env || typeof config.env !== 'object') config.env = {};
+if (pemPath) {
+  if (config.env.GITHUB_APP_PRIVATE_KEY_FILE !== pemPath) {
+    config.env.GITHUB_APP_PRIVATE_KEY_FILE = pemPath;
+    console.log('  Set env.GITHUB_APP_PRIVATE_KEY_FILE');
   }
+}
+if (appIdVal) {
+  if (config.env.GITHUB_APP_ID !== appIdVal) {
+    config.env.GITHUB_APP_ID = appIdVal;
+    console.log('  Set env.GITHUB_APP_ID');
+  }
+}
+if (installIdVal) {
+  if (config.env.GITHUB_INSTALLATION_ID !== installIdVal) {
+    config.env.GITHUB_INSTALLATION_ID = installIdVal;
+    console.log('  Set env.GITHUB_INSTALLATION_ID');
+  }
+}
+
+// --- defensive cleanup of prior SecretRef attempts ---
+// Earlier versions wrote SecretRef objects under skills.entries["github-tools"].env.
+// OpenClaw's schema requires plain strings there, so strip the invalid block.
+if (config.skills && config.skills.entries && config.skills.entries['github-tools']) {
+  const gh = config.skills.entries['github-tools'];
+  if (gh.env && typeof gh.env === 'object') {
+    const hadObjectValues = Object.values(gh.env).some(v => v && typeof v === 'object');
+    if (hadObjectValues) {
+      delete gh.env;
+      console.log('  Removed invalid skills.entries["github-tools"].env block');
+    }
+  }
+}
+// Earlier versions also registered a `filemain` secrets provider pointing at
+// ~/.openclaw/secrets.json. Remove it if present (no SecretRefs reference it now).
+if (config.secrets && config.secrets.providers && config.secrets.providers.filemain) {
+  delete config.secrets.providers.filemain;
+  console.log('  Removed unused secrets provider: filemain');
 }
 
 // --- ensure agent-to-agent handoff is enabled and agents are in the allowlist ---
@@ -344,7 +333,6 @@ required=(
   "$SHARED_ROOT/contracts.md"
   "$SHARED_ROOT/config.json"
   "$PEM_PATH"
-  "$SECRETS_PATH"
   "$SKILLS_ROOT/customer-facing/SKILL.md"
   "$SKILLS_ROOT/doc-style/SKILL.md"
   "$SKILLS_ROOT/github-tools/SKILL.md"
@@ -368,31 +356,28 @@ ok "All required files present"
 
 # --- 8. restart openclaw gateway ---
 
-info "Reloading OpenClaw secrets and restarting gateway..."
+info "Restarting OpenClaw gateway..."
 
 if command -v openclaw &>/dev/null; then
-  openclaw secrets reload || warn "secrets reload failed — gateway restart will still pick up new refs"
   openclaw gateway restart
   ok "Gateway restarted"
 else
   warn "openclaw command not found — skip gateway restart"
-  info "Restart OpenClaw manually to pick up the new agents and secrets"
+  info "Restart OpenClaw manually to pick up the new agents and env"
 fi
 
 # --- done ---
 
 echo
 ok "Install complete"
-info "Agents:      $AGENTS_ROOT/{orchestrator,change-scanner,doc-classifier,doc-publisher}"
-info "Skills:      $SKILLS_ROOT/{customer-facing,doc-style,github-tools}"
-info "Config:      $SHARED_ROOT/config.json"
-info "Secrets:     $SECRETS_PATH (chmod 600)"
-info "PEM:         $PEM_PATH (chmod 600)"
-info "Registry:    $CONFIG_PATH"
+info "Agents:     $AGENTS_ROOT/{orchestrator,change-scanner,doc-classifier,doc-publisher}"
+info "Skills:     $SKILLS_ROOT/{customer-facing,doc-style,github-tools}"
+info "Config:     $SHARED_ROOT/config.json"
+info "PEM:        $PEM_PATH (chmod 600)"
+info "Registry:   $CONFIG_PATH (GitHub App values set under top-level env)"
 echo
 info "Next steps:"
 info "  1. Edit $SHARED_ROOT/config.json with your repos (if using template)"
 info "  2. Start the orchestrator agent in your OpenClaw session"
-info "     (change-scanner and doc-publisher pick up GitHub creds via SecretRef — no shell env needed)"
 echo
 info "To update agent code later, pull changes and re-run: bash installer/install.sh"

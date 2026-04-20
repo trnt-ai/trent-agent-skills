@@ -37,9 +37,8 @@ Validate:
   - contents: read/write
 
 Wire natively (no shell env needed):
-- Write collected values to `~/.openclaw/secrets.json` (`chmod 600`)
-- Register a `file` secrets provider (`filemain`) in `openclaw.json` pointing at that file
-- Add SecretRef `env` blocks to the agents that call GitHub (`change-scanner`, `doc-publisher`) so the gateway resolves `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY_FILE` at activation
+- Write the PEM to `~/.openclaw/credentials/github-app.pem` (`chmod 600`)
+- Set `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY_FILE` as plain strings under the top-level `env` block in `openclaw.json` — the gateway injects them into spawned processes on restart
 
 ### Phase 3: Source and docs repos
 
