@@ -158,7 +158,7 @@ info "Backed up openclaw.json to $BACKUP_PATH"
 
 # Node script: upsert agents.list and agent-to-agent allowlist
 # Does NOT remove other agents or touch agents/main
-if ! OPENCLAW_ROOT="$OPENCLAW_ROOT" CONFIG_PATH="$CONFIG_PATH" node <<'NODE'
+if OPENCLAW_ROOT="$OPENCLAW_ROOT" CONFIG_PATH="$CONFIG_PATH" node <<'NODE'
 const fs = require('fs');
 const path = require('path');
 
