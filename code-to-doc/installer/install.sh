@@ -150,11 +150,33 @@ PEM_PATH="$CREDENTIALS_DIR/github-app.pem"
 GITHUB_APP_ID_VAL=""
 GITHUB_INSTALLATION_ID_VAL=""
 
-if [ -f "$PEM_PATH" ]; then
-  ok "GitHub App PEM already at $PEM_PATH — skipping credential prompt"
-  info "To rotate, remove $PEM_PATH and re-run the installer."
+# Check which values are already persisted in openclaw.json so re-runs only
+# prompt for the missing pieces. Absent openclaw.json means everything is missing.
+NEED_APP_ID=1
+NEED_INSTALL_ID=1
+if [ -f "$CONFIG_PATH" ]; then
+  NEED_APP_ID=$(CONFIG_PATH="$CONFIG_PATH" node -e '
+    try {
+      const c = JSON.parse(require("fs").readFileSync(process.env.CONFIG_PATH, "utf8"));
+      process.stdout.write(c.env && c.env.GITHUB_APP_ID ? "0" : "1");
+    } catch (_) { process.stdout.write("1"); }
+  ')
+  NEED_INSTALL_ID=$(CONFIG_PATH="$CONFIG_PATH" node -e '
+    try {
+      const c = JSON.parse(require("fs").readFileSync(process.env.CONFIG_PATH, "utf8"));
+      process.stdout.write(c.env && c.env.GITHUB_INSTALLATION_ID ? "0" : "1");
+    } catch (_) { process.stdout.write("1"); }
+  ')
+fi
+
+NEED_PEM=1
+[ -f "$PEM_PATH" ] && NEED_PEM=0
+
+if [ "$NEED_PEM" = "0" ] && [ "$NEED_APP_ID" = "0" ] && [ "$NEED_INSTALL_ID" = "0" ]; then
+  ok "GitHub App credentials already configured — skipping prompts"
+  info "To rotate: remove $PEM_PATH or clear env.GITHUB_APP_ID/INSTALLATION_ID in $CONFIG_PATH, then re-run."
 else
-  info "Setting up GitHub App credentials..."
+  info "Setting up GitHub App credentials (prompting for missing values only)..."
   mkdir -p "$CREDENTIALS_DIR"
   chmod 700 "$CREDENTIALS_DIR"
 
@@ -162,29 +184,35 @@ else
     fail "No terminal available — run the installer interactively to set GitHub App credentials."
   fi
 
-  printf 'GitHub App ID: ' > /dev/tty
-  IFS= read -r GITHUB_APP_ID_VAL < /dev/tty
-  [ -n "$GITHUB_APP_ID_VAL" ] || fail "GitHub App ID is required"
+  if [ "$NEED_APP_ID" = "1" ]; then
+    printf 'GitHub App ID: ' > /dev/tty
+    IFS= read -r GITHUB_APP_ID_VAL < /dev/tty
+    [ -n "$GITHUB_APP_ID_VAL" ] || fail "GitHub App ID is required"
+  fi
 
-  printf 'GitHub Installation ID: ' > /dev/tty
-  IFS= read -r GITHUB_INSTALLATION_ID_VAL < /dev/tty
-  [ -n "$GITHUB_INSTALLATION_ID_VAL" ] || fail "GitHub Installation ID is required"
+  if [ "$NEED_INSTALL_ID" = "1" ]; then
+    printf 'GitHub Installation ID: ' > /dev/tty
+    IFS= read -r GITHUB_INSTALLATION_ID_VAL < /dev/tty
+    [ -n "$GITHUB_INSTALLATION_ID_VAL" ] || fail "GitHub Installation ID is required"
+  fi
 
-  printf "Paste the GitHub App private key (PEM), then type 'END' on its own line:\n" > /dev/tty
-  PEM_CONTENT=""
-  while IFS= read -r line; do
-    [ "$line" = "END" ] && break
-    PEM_CONTENT+="$line"$'\n'
-  done < /dev/tty
+  if [ "$NEED_PEM" = "1" ]; then
+    printf "Paste the GitHub App private key (PEM), then type 'END' on its own line:\n" > /dev/tty
+    PEM_CONTENT=""
+    while IFS= read -r line; do
+      [ "$line" = "END" ] && break
+      PEM_CONTENT+="$line"$'\n'
+    done < /dev/tty
 
-  printf '%s' "$PEM_CONTENT" | grep -q '^-----BEGIN [A-Z ]*PRIVATE KEY-----' \
-    || fail "PEM content invalid — missing BEGIN line"
-  printf '%s' "$PEM_CONTENT" | grep -q '^-----END [A-Z ]*PRIVATE KEY-----' \
-    || fail "PEM content invalid — missing END line"
+    printf '%s' "$PEM_CONTENT" | grep -q '^-----BEGIN [A-Z ]*PRIVATE KEY-----' \
+      || fail "PEM content invalid — missing BEGIN line"
+    printf '%s' "$PEM_CONTENT" | grep -q '^-----END [A-Z ]*PRIVATE KEY-----' \
+      || fail "PEM content invalid — missing END line"
 
-  ( umask 077 && printf '%s' "$PEM_CONTENT" > "$PEM_PATH" )
-  chmod 600 "$PEM_PATH"
-  ok "Wrote PEM to $PEM_PATH (chmod 600)"
+    ( umask 077 && printf '%s' "$PEM_CONTENT" > "$PEM_PATH" )
+    chmod 600 "$PEM_PATH"
+    ok "Wrote PEM to $PEM_PATH (chmod 600)"
+  fi
 fi
 
 # --- 6. register agents and GitHub env in openclaw.json ---
