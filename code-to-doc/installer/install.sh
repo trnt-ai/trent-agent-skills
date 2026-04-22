@@ -334,6 +334,15 @@ for (const { id } of desiredAgents) {
   }
 }
 
+// --- ensure cross-agent session visibility ---
+if (!config.tools.sessions || typeof config.tools.sessions !== 'object') {
+  config.tools.sessions = {};
+}
+if (config.tools.sessions.visibility !== 'all') {
+  config.tools.sessions.visibility = 'all';
+  console.log('  Set tools.sessions.visibility = all');
+}
+
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
 console.log(`  Wrote ${configPath}`);
 NODE
