@@ -1,0 +1,1413 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'OpenClaw - AWS Native Deployment (Bedrock + SSM + VPC Endpoints)'
+# Required for Fn::FindInMap DefaultValue (RegionCapabilities lookup below).
+Transform: 'AWS::LanguageExtensions'
+
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - E6101
+        # False positive: cfn-lint evaluates Fn::FindInMap DefaultValue as literal
+        # and warns the !Equals is always true/false. Deploys correctly.
+        - W8003
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Basic Configuration"
+        Parameters:
+          - OpenClawModel
+          - OpenClawVersion
+          - InstanceType
+          - KeyPairName
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - CreateVPCEndpoints
+          - EnableNetworkFirewall
+          - AllowedSSHCIDR
+
+Parameters:
+  OpenClawModel:
+    Type: String
+    Default: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    Description: "Bedrock model ID. Newer Anthropic Claude (3.x+, 4.x+) REQUIRE an inference profile (prefix global./us./eu./apac.) — bare foundation IDs fail with 'on-demand throughput isn't supported'. Older models (Nova-Lite, Titan, Llama, Mistral, etc.) accept bare IDs. Default uses EU profile for data residency in eu-west-1; switch to global.* for cross-region capacity routing."
+    AllowedValues:
+      # Anthropic Claude — REQUIRE inference profile (no on-demand bare-ID support).
+      # eu.* keeps traffic in EU regions; global.* enables cross-region routing.
+      - "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      - "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+      - "eu.anthropic.claude-opus-4-5-20251101-v1:0"
+      - "eu.anthropic.claude-sonnet-4-20250514-v1:0"
+      - "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      - "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+      - "global.anthropic.claude-opus-4-5-20251101-v1:0"
+      - "global.anthropic.claude-sonnet-4-20250514-v1:0"
+      - "global.anthropic.claude-opus-4-6-v1"
+      # Models that accept bare foundation IDs (on-demand throughput supported).
+      - "amazon.nova-2-lite-v1:0"
+      - "amazon.titan-embed-text-v2:0"
+      - "us.amazon.nova-pro-v1:0"
+      - "global.amazon.nova-2-lite-v1:0"
+      - "us.deepseek.r1-v1:0"
+      - "us.meta.llama3-3-70b-instruct-v1:0"
+      - "moonshotai.kimi-k2.5"
+
+  InstanceType:
+    Type: String
+    Default: "c7g.xlarge"
+    Description: "Graviton (ARM) recommended for 20-40% better price-performance. x86 also supported. c7g.xlarge gives enough headroom that the SSM agent doesn't starve during the npm install storm at first boot."
+    AllowedValues:
+      - "t4g.small"
+      - "t4g.medium"
+      - "t4g.large"
+      - "t4g.xlarge"
+      - "c6g.large"
+      - "c6g.xlarge"
+      - "c7g.large"
+      - "c7g.xlarge"
+      - "t3.small"
+      - "t3.medium"
+      - "t3.large"
+      - "c5.xlarge"
+
+  KeyPairName:
+    Type: String
+    Default: "none"
+    Description: "EC2 key pair for emergency SSH access (optional - set to 'none' to skip)"
+
+  AllowedSSHCIDR:
+    Type: String
+    Default: ""
+    Description: "CIDR for SSH access (optional - leave empty for no inbound rules. SSM Session Manager is used for access. If SSH is needed, set to your IP/32 - find your IP at checkip.amazonaws.com)"
+
+  CreateVPCEndpoints:
+    Type: String
+    Default: "true"
+    Description: "Create VPC endpoints for private network access to Bedrock and SSM"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  EnableSandbox:
+    Type: String
+    Default: "true"
+    Description: "Install Docker for sandboxed execution (recommended for group chats)"
+
+  OpenClawVersion:
+    Type: String
+    Default: "2026.4.23"
+    AllowedValues:
+      - "2026.4.23"
+      - "latest"
+    Description: "OpenClaw version (must be 2026.4.5+). Uses the modern plugin config (plugins.entries with auto-discovery). 'latest' floats — only use on staging stacks."
+
+  EnableDataProtection:
+    Type: String
+    Default: "false"
+    Description: "Retain data volume when stack is deleted (protects against accidental data loss)"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  EnableNetworkFirewall:
+    Type: String
+    Default: "true"
+    Description: "Deploy AWS Network Firewall with FQDN allow-list and move instance to a private subnet. Adds ~$400/month (firewall endpoint + NAT Gateway). Mitigates R1 host-level data exfiltration."
+    AllowedValues:
+      - "true"
+      - "false"
+
+  UseCodeArtifact:
+    Type: String
+    Default: "true"
+    Description: "Proxy npm through an AWS CodeArtifact repository. Eliminates runtime dependency on public npmjs.org, gives supply-chain audit trail, survives npmjs outages. Adds ~$15/month (2 VPC endpoints) + pennies for storage."
+    AllowedValues:
+      - "true"
+      - "false"
+
+Conditions:
+  CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, "none"]]
+  AllowSSH: !And
+    - !Not [!Equals [!Ref AllowedSSHCIDR, ""]]
+    - !Not [!Equals [!Ref KeyPairName, "none"]]
+  # Bedrock Mantle supported regions: https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html#bedrock-mantle-supported
+  # Looked up via RegionCapabilities mapping; DefaultValue handles unlisted regions.
+  IsMantleSupportedRegion: !Equals
+    - !FindInMap [RegionCapabilities, !Ref "AWS::Region", MantleSupported, DefaultValue: "false"]
+    - "true"
+  CreateMantleEndpoint: !And [ Condition: CreateEndpoints, Condition: IsMantleSupportedRegion ]
+  EnableDocker: !Equals [!Ref EnableSandbox, "true"]
+  ProtectData: !Equals [!Ref EnableDataProtection, "true"]
+  DeleteData: !Not [!Equals [!Ref EnableDataProtection, "true"]]
+  EnableFirewall: !Equals [!Ref EnableNetworkFirewall, "true"]
+  UseCA: !Equals [!Ref UseCodeArtifact, "true"]
+  CreateCAEndpoints: !And [ Condition: UseCA, Condition: CreateEndpoints ]
+
+Mappings:
+  ArchitectureMap:
+    t3.small: { Arch: "amd64" }
+    t3.medium: { Arch: "amd64" }
+    t3.large: { Arch: "amd64" }
+    t3.xlarge: { Arch: "amd64" }
+    c5.xlarge: { Arch: "amd64" }
+    t4g.small: { Arch: "arm64" }
+    t4g.medium: { Arch: "arm64" }
+    t4g.large: { Arch: "arm64" }
+    t4g.xlarge: { Arch: "arm64" }
+    c6g.large: { Arch: "arm64" }
+    c6g.xlarge: { Arch: "arm64" }
+    c7g.large: { Arch: "arm64" }
+    c7g.xlarge: { Arch: "arm64" }
+
+  # Per-region feature flags. Regions not listed fall back to DefaultValue "false"
+  # via Fn::FindInMap. Add a region here to enable Bedrock Mantle VPC endpoint.
+  RegionCapabilities:
+    us-east-1: { MantleSupported: "true" }
+    us-east-2: { MantleSupported: "true" }
+    us-west-2: { MantleSupported: "true" }
+    ap-southeast-3: { MantleSupported: "true" }
+    ap-south-1: { MantleSupported: "true" }
+    ap-northeast-1: { MantleSupported: "true" }
+    eu-central-1: { MantleSupported: "true" }
+    eu-west-1: { MantleSupported: "true" }
+    eu-west-2: { MantleSupported: "true" }
+    eu-south-1: { MantleSupported: "true" }
+    eu-north-1: { MantleSupported: "true" }
+    sa-east-1: { MantleSupported: "true" }
+
+
+Resources:
+  # ==================== Wait Condition ====================
+  OpenClawWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  OpenClawWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: OpenClawInstance
+    Properties:
+      Handle: !Ref OpenClawWaitHandle
+      # 45 min: covers cold-cache first boot on c7g.xlarge (15-25 min npm
+      # install + 5-15 min Network Firewall provisioning) with comfortable
+      # headroom. Smaller instance types may need more — see LEARNINGS.md #24.
+      Timeout: '2700'
+      Count: 1
+
+  # ==================== VPC and Network ====================
+  OpenClawVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  OpenClawInternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      InternetGatewayId: !Ref OpenClawInternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.1.0/24"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-subnet"
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.2.0/24"
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet-az1"
+
+  # Second private subnet in a different AZ for VPC endpoint availability.
+  # Some services (e.g. bedrock-mantle) are not available in all AZs.
+  # With two subnets, CloudFormation picks the AZ that supports the service.
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.3.0/24"
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet-az2"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OpenClawVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref OpenClawInternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ==================== Egress path: instance -> Firewall -> NAT -> IGW ====================
+  # Dedicated subnet for the Network Firewall endpoint (must be separate from instance subnet)
+  FirewallSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: EnableFirewall
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.4.0/28"
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-firewall-subnet"
+
+  NATEIP:
+    Type: AWS::EC2::EIP
+    Condition: EnableFirewall
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-nat-eip"
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: EnableFirewall
+    Properties:
+      AllocationId: !GetAtt NATEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-nat"
+
+  # FQDN allow-list for instance egress. Covers bootstrap (apt, npm, nvm, docker,
+  # awscli) and runtime (GitHub API, Anthropic, Bedrock public endpoints).
+  OpenClawFirewallRuleGroup:
+    Type: AWS::NetworkFirewall::RuleGroup
+    Condition: EnableFirewall
+    Properties:
+      Capacity: 100
+      RuleGroupName: !Sub "${AWS::StackName}-allow-fqdns"
+      Type: STATEFUL
+      # STRICT_ORDER: rules are evaluated in the exact order they appear in
+      # the RulesString (first match wins). Pass rules for allowed FQDNs come
+      # first; the two catch-all drop rules at the end block everything else.
+      # Note: Network Firewall REJECTS `priority:` and `classtype:` keywords
+      # inside Suricata rules when the rule group is in STRICT_ORDER — ordering
+      # comes from rule position in the string, not a Suricata priority keyword.
+      RuleGroup:
+        StatefulRuleOptions:
+          RuleOrder: STRICT_ORDER
+        RulesSource:
+          RulesString: |
+            pass tls any any -> any any (tls.sni; dotprefix; content:".github.com"; endswith; msg:"allow .github.com"; flow:to_server, established; sid:10001; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".github.com"; endswith; msg:"allow .github.com http"; flow:to_server, established; sid:10002; rev:1;)
+            pass tls any any -> any any (tls.sni; dotprefix; content:".githubusercontent.com"; endswith; msg:"allow .githubusercontent.com"; flow:to_server, established; sid:10003; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".githubusercontent.com"; endswith; msg:"allow .githubusercontent.com http"; flow:to_server, established; sid:10004; rev:1;)
+            pass tls any any -> any any (tls.sni; dotprefix; content:".anthropic.com"; endswith; msg:"allow .anthropic.com"; flow:to_server, established; sid:10005; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".anthropic.com"; endswith; msg:"allow .anthropic.com http"; flow:to_server, established; sid:10006; rev:1;)
+            pass tls any any -> any any (tls.sni; dotprefix; content:".openai.com"; endswith; msg:"allow .openai.com"; flow:to_server, established; sid:10007; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".openai.com"; endswith; msg:"allow .openai.com http"; flow:to_server, established; sid:10008; rev:1;)
+            pass tls any any -> any any (tls.sni; dotprefix; content:".chatgpt.com"; endswith; msg:"allow .chatgpt.com (Codex CLI backend)"; flow:to_server, established; sid:10025; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".chatgpt.com"; endswith; msg:"allow .chatgpt.com http"; flow:to_server, established; sid:10026; rev:1;)
+            pass tls any any -> any any (tls.sni; dotprefix; content:".amazonaws.com"; endswith; msg:"allow .amazonaws.com"; flow:to_server, established; sid:10009; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".amazonaws.com"; endswith; msg:"allow .amazonaws.com http"; flow:to_server, established; sid:10010; rev:1;)
+            pass tls any any -> any any (tls.sni; dotprefix; content:".docker.com"; endswith; msg:"allow .docker.com"; flow:to_server, established; sid:10011; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".docker.com"; endswith; msg:"allow .docker.com http"; flow:to_server, established; sid:10012; rev:1;)
+            pass tls any any -> any any (tls.sni; dotprefix; content:".npmjs.org"; endswith; msg:"allow .npmjs.org"; flow:to_server, established; sid:10013; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".npmjs.org"; endswith; msg:"allow .npmjs.org http"; flow:to_server, established; sid:10014; rev:1;)
+            pass tls any any -> any any (tls.sni; dotprefix; content:".nodejs.org"; endswith; msg:"allow .nodejs.org"; flow:to_server, established; sid:10015; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".nodejs.org"; endswith; msg:"allow .nodejs.org http"; flow:to_server, established; sid:10016; rev:1;)
+            pass tls any any -> any any (tls.sni; dotprefix; content:".ubuntu.com"; endswith; msg:"allow .ubuntu.com"; flow:to_server, established; sid:10017; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".ubuntu.com"; endswith; msg:"allow .ubuntu.com http"; flow:to_server, established; sid:10018; rev:1;)
+            pass tls any any -> any any (tls.sni; dotprefix; content:".pypi.org"; endswith; msg:"allow .pypi.org"; flow:to_server, established; sid:10019; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".pypi.org"; endswith; msg:"allow .pypi.org http"; flow:to_server, established; sid:10020; rev:1;)
+            pass tls any any -> any any (tls.sni; dotprefix; content:".pythonhosted.org"; endswith; msg:"allow .pythonhosted.org"; flow:to_server, established; sid:10021; rev:1;)
+            pass http any any -> any any (http.host; dotprefix; content:".pythonhosted.org"; endswith; msg:"allow .pythonhosted.org http"; flow:to_server, established; sid:10022; rev:1;)
+            drop tls any any -> any any (msg:"drop unmatched TLS"; flow:to_server, established; sid:99001; rev:1;)
+            drop http any any -> any any (msg:"drop unmatched HTTP"; flow:to_server, established; sid:99002; rev:1;)
+
+  OpenClawFirewallPolicy:
+    Type: AWS::NetworkFirewall::FirewallPolicy
+    Condition: EnableFirewall
+    Properties:
+      FirewallPolicyName: !Sub "${AWS::StackName}-policy"
+      FirewallPolicy:
+        StatelessDefaultActions:
+          - "aws:forward_to_sfe"
+        StatelessFragmentDefaultActions:
+          - "aws:forward_to_sfe"
+        # STRICT_ORDER on both policy and rule group (both must agree).
+        # drop_established ensures that any established TCP flow not matched by
+        # a pass rule in the rule group is dropped. alert_established mirrors
+        # that as an alert so drops appear in the ALERT log. Belt-and-suspenders
+        # with the rule group's own catch-all drop rules.
+        StatefulEngineOptions:
+          RuleOrder: STRICT_ORDER
+        StatefulDefaultActions:
+          - "aws:drop_established"
+          - "aws:alert_established"
+        StatefulRuleGroupReferences:
+          - ResourceArn: !GetAtt OpenClawFirewallRuleGroup.RuleGroupArn
+            Priority: 100
+
+  OpenClawFirewall:
+    Type: AWS::NetworkFirewall::Firewall
+    Condition: EnableFirewall
+    Properties:
+      FirewallName: !Sub "${AWS::StackName}-firewall"
+      FirewallPolicyArn: !GetAtt OpenClawFirewallPolicy.FirewallPolicyArn
+      VpcId: !Ref OpenClawVPC
+      SubnetMappings:
+        - SubnetId: !Ref FirewallSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-firewall"
+
+  FirewallLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: EnableFirewall
+    Properties:
+      LogGroupName: !Sub "/aws/network-firewall/${AWS::StackName}"
+      RetentionInDays: 7
+
+  # Without this, Network Firewall cannot write alert events to the log group
+  # and `aws logs tail` comes back empty even when traffic is being dropped.
+  FirewallLogResourcePolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Condition: EnableFirewall
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-firewall-log-policy"
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Sid": "NetworkFirewallLogsDelivery",
+            "Effect": "Allow",
+            "Principal": {"Service": "delivery.logs.amazonaws.com"},
+            "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+            "Resource": [
+              "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/network-firewall/${AWS::StackName}:*",
+              "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/network-firewall/${AWS::StackName}/flow:*"
+            ],
+            "Condition": {
+              "StringEquals": {"aws:SourceAccount": "${AWS::AccountId}"},
+              "ArnLike": {"aws:SourceArn": "arn:${AWS::Partition}:network-firewall:${AWS::Region}:${AWS::AccountId}:firewall/*"}
+            }
+          }]
+        }
+
+  FirewallFlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: EnableFirewall
+    Properties:
+      LogGroupName: !Sub "/aws/network-firewall/${AWS::StackName}/flow"
+      RetentionInDays: 3
+
+  FirewallLogging:
+    Type: AWS::NetworkFirewall::LoggingConfiguration
+    Condition: EnableFirewall
+    Properties:
+      FirewallArn: !Ref OpenClawFirewall
+      LoggingConfiguration:
+        LogDestinationConfigs:
+          - LogType: ALERT
+            LogDestinationType: CloudWatchLogs
+            LogDestination:
+              logGroup: !Ref FirewallLogGroup
+          - LogType: FLOW
+            LogDestinationType: CloudWatchLogs
+            LogDestination:
+              logGroup: !Ref FirewallFlowLogGroup
+
+  # Firewall subnet -> NAT Gateway -> IGW
+  FirewallRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: EnableFirewall
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-firewall-rt"
+
+  FirewallRoute:
+    Type: AWS::EC2::Route
+    Condition: EnableFirewall
+    Properties:
+      RouteTableId: !Ref FirewallRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NATGateway
+
+  FirewallSubnetRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: EnableFirewall
+    Properties:
+      SubnetId: !Ref FirewallSubnet
+      RouteTableId: !Ref FirewallRouteTable
+
+  # Return-path route: NAT -> Firewall -> Instance.
+  # Network Firewall is stateful; Suricata needs to see BOTH directions of a
+  # flow to reassemble TLS / HTTP and match rules on tls.sni / http.host.
+  # Without this route, return traffic from NAT uses the VPC local route
+  # straight to the instance's ENI, bypassing the firewall. The flow gets
+  # stuck in state:new with app_proto:unknown and no rule ever matches.
+  # This more-specific route overrides the local route for the instance CIDR.
+  PublicSubnetFirewallReturnRoute:
+    Type: AWS::EC2::Route
+    Condition: EnableFirewall
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "10.0.2.0/24"
+      VpcEndpointId: !Select [1, !Split [":", !Select [0, !GetAtt OpenClawFirewall.EndpointIds]]]
+
+  # Instance (private) subnet -> Firewall endpoint
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: EnableFirewall
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-rt"
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Condition: EnableFirewall
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      VpcEndpointId: !Select [1, !Split [":", !Select [0, !GetAtt OpenClawFirewall.EndpointIds]]]
+
+  PrivateSubnetRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: EnableFirewall
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ==================== CodeArtifact (npm proxy) ====================
+  # A private npm registry that caches public npmjs packages. The instance
+  # never talks to npmjs.org directly; it fetches from CodeArtifact over a
+  # VPC endpoint. CodeArtifact upstreams to npmjs from AWS-managed infra,
+  # so upgrades / cache misses don't require instance-side egress changes.
+  OpenClawArtifactDomain:
+    Type: AWS::CodeArtifact::Domain
+    Condition: UseCA
+    Properties:
+      DomainName: !Sub "${AWS::StackName}-artifacts"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-artifacts"
+
+  OpenClawNpmRepo:
+    Type: AWS::CodeArtifact::Repository
+    Condition: UseCA
+    Properties:
+      DomainName: !GetAtt OpenClawArtifactDomain.Name
+      RepositoryName: "npm-cache"
+      Description: "Cached npm proxy to public npmjs"
+      ExternalConnections:
+        - "public:npmjs"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-npm-cache"
+
+  # VPC Endpoint Security Group
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoints
+    Properties:
+      GroupDescription: "Security group for VPC endpoints"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref OpenClawSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpce-sg"
+
+  # Bedrock Runtime VPC Endpoint (Converse API)
+  BedrockRuntimeVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock-runtime'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # Bedrock Mantle VPC Endpoint (OpenAI-compatible API for Project Mantle models like Kimi K2.5)
+  # Uses two subnets in different AZs — bedrock-mantle may not be available in all AZs.
+  BedrockMantleVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateMantleEndpoint
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock-mantle'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # SSM VPC Endpoint (for Session Manager)
+  SSMVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  SSMMessagesVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  EC2MessagesVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # CodeArtifact API: for GetAuthorizationToken, GetRepositoryEndpoint.
+  CodeArtifactAPIVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateCAEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.codeartifact.api'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # CodeArtifact repositories: for ReadFromRepository (actual package fetches).
+  CodeArtifactRepoVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateCAEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.codeartifact.repositories'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # ==================== IAM Role ====================
+  OpenClawInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - 'arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy'
+      Policies:
+        - PolicyName: BedrockAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                  - 'bedrock:ListFoundationModels'
+                  - 'bedrock:GetFoundationModel'
+                  - 'bedrock:ListInferenceProfiles'
+                Resource: '*'
+        - PolicyName: BedrockMantleAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock-mantle:*'
+                Resource: '*'
+        - PolicyName: SSMParameterPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ssm:PutParameter'
+                  - 'ssm:GetParameter'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*'
+        - PolicyName: EC2DescribeTagsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:DescribeTags'
+                Resource: '*'
+        - PolicyName: CloudFormationDescribePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'cloudformation:DescribeStackResource'
+                  - 'cloudformation:SignalResource'
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance-role"
+
+  OpenClawInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref OpenClawInstanceRole
+
+  # CodeArtifact permissions — separate policy so we can gate on UseCA without
+  # needing inline policies that reference conditionally-created resources.
+  CodeArtifactAccessPolicy:
+    Type: AWS::IAM::Policy
+    Condition: UseCA
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-codeartifact-access"
+      Roles:
+        - !Ref OpenClawInstanceRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'codeartifact:GetAuthorizationToken'
+            Resource: !GetAtt OpenClawArtifactDomain.Arn
+          - Effect: Allow
+            Action:
+              - 'codeartifact:GetRepositoryEndpoint'
+              - 'codeartifact:ReadFromRepository'
+            Resource: !GetAtt OpenClawNpmRepo.Arn
+          - Effect: Allow
+            Action: 'sts:GetServiceBearerToken'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'sts:AWSServiceName': 'codeartifact.amazonaws.com'
+
+  # ==================== Security Group ====================
+  OpenClawSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "OpenClaw instance security group"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupIngress:
+        - !If
+          - AllowSSH
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: !Ref AllowedSSHCIDR
+            Description: "SSH access (fallback)"
+          - !Ref AWS::NoValue
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+          Description: "HTTPS egress (FQDN-filtered by Network Firewall when enabled)"
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+          Description: "HTTP egress for apt repos (FQDN-filtered by Network Firewall when enabled)"
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: "10.0.0.0/16"
+          Description: "DNS to VPC resolver"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-sg"
+
+  # ==================== Data Volume ====================
+  OpenClawDataVolumeRetained:
+    Type: AWS::EC2::Volume
+    Condition: ProtectData
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: 30
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-data"
+
+  OpenClawDataVolumeNotRetained:
+    Type: AWS::EC2::Volume
+    Condition: DeleteData
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: 30
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-data"
+
+  # ==================== EC2 Instance ====================
+  # Note: no DependsOn on firewall resources — they are conditional and CFN errors
+  # on DependsOn to resources whose Condition is false. setup.sh waits for
+  # internet reachability before running apt-get, which covers the startup race.
+  OpenClawInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          default:
+            - write_files
+            - run_setup
+        write_files:
+          files:
+            /opt/openclaw/openclaw-config.json:
+              content: |
+                {
+                  "gateway": {
+                    "mode": "local",
+                    "port": 18789,
+                    "bind": "loopback",
+                    "controlUi": {
+                      "enabled": true,
+                      "allowInsecureAuth": true
+                    },
+                    "auth": {
+                      "mode": "token",
+                      "token": "GATEWAY_TOKEN_PLACEHOLDER"
+                    }
+                  },
+                  "plugins": {
+                    "entries": {
+                      "amazon-bedrock": {
+                        "enabled": true
+                      }
+                    }
+                  },
+                  "agents": {
+                    "defaults": {
+                      "model": {
+                        "primary": "amazon-bedrock/MODEL_ID_PLACEHOLDER"
+                      },
+                      "memorySearch": {
+                        "provider": "bedrock",
+                        "model": "amazon.titan-embed-text-v2:0"
+                      }
+                    }
+                  }
+                }
+              mode: "000644"
+              owner: root
+              group: root
+            /opt/openclaw/SOUL.md:
+              content: |
+                # OpenClaw on AWS
+
+                You are an AI assistant running on AWS with Amazon Bedrock. You are helpful, concise, and friendly.
+
+                ## First Conversation
+
+                When a user sends their very first message (no prior conversation history), start by warmly greeting them and then help them connect a messaging platform. Say something like:
+
+                "Welcome! I'm your AI assistant running on AWS. Before we dive in, let's connect me to your favorite messaging app so you can chat with me anytime.
+
+                Which platform would you like to connect?
+                1. WhatsApp — scan a QR code from your phone
+                2. Telegram — create a bot via @BotFather
+                3. Discord — add me to your server
+                4. Slack — install me in your workspace
+                5. Feishu/Lark — connect via webhook bridge
+
+                Just reply with a number or platform name, and I'll walk you through the setup step by step."
+
+                After the user chooses, guide them through the specific setup:
+
+                **WhatsApp**: Tell them to go to the Web UI (Channels > Add Channel > WhatsApp), then on their phone: WhatsApp > Settings > Linked Devices > Link a Device > scan the QR code.
+
+                **Telegram**: Tell them to message @BotFather on Telegram, send /newbot, choose a name and username (must end with 'bot'), copy the token, then paste it in Web UI (Channels > Add Channel > Telegram).
+
+                **Discord**: Tell them to visit discord.com/developers/applications, create a new app, go to Bot > Add Bot, copy the token, enable Message Content Intent, generate an invite URL, then paste the token in Web UI (Channels > Add Channel > Discord).
+
+                **Slack**: Tell them to visit api.slack.com/apps, create a new app, add bot scopes (chat:write, channels:history), install to workspace, copy the Bot User OAuth Token, then paste in Web UI (Channels > Add Channel > Slack).
+
+                **Feishu/Lark**: Tell them this uses a community bridge plugin. They need to configure their Feishu bot credentials in the Web UI. Point them to the docs: https://docs.openclaw.ai/channels or the community plugin page.
+
+                ## Ongoing Conversations
+
+                After the first conversation, be a helpful general-purpose assistant. You can:
+                - Answer questions using web search
+                - Help with coding, writing, analysis
+                - Manage tasks and reminders
+                - Process files and documents
+
+                Be concise. Get to the point. If there's a good answer, give it directly.
+              mode: "000644"
+              owner: root
+              group: root
+            /opt/openclaw/ssm-portforward.sh:
+              content: |
+                #!/bin/bash
+                IMDS_TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+                INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+                REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
+                STACK_NAME=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $REGION)
+                TOKEN=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/gateway-token" --with-decryption --query Parameter.Value --output text --region $REGION)
+
+                echo "=========================================="
+                echo "OpenClaw SSM Port Forwarding"
+                echo "=========================================="
+                echo ""
+                echo "Run on your local computer:"
+                echo ""
+                echo "aws ssm start-session \\"
+                echo "  --target $INSTANCE_ID \\"
+                echo "  --region $REGION \\"
+                echo "  --document-name AWS-StartPortForwardingSession \\"
+                echo "  --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
+                echo ""
+                echo "Then open in browser:"
+                echo "http://localhost:18789/?token=$TOKEN"
+                echo ""
+                echo "=========================================="
+              mode: "000755"
+              owner: ubuntu
+              group: ubuntu
+            /opt/openclaw/setup.sh:
+              content:
+                Fn::Sub: |
+                  #!/bin/bash
+                  exec > >(tee /var/log/openclaw-setup.log)
+                  exec 2>&1
+
+                  echo "=========================================="
+                  echo "OpenClaw AWS Native Setup: $(date)"
+                  echo "=========================================="
+
+                  export DEBIAN_FRONTEND=noninteractive
+
+                  # Mount data volume
+                  echo "[0/9] Mounting data volume..."
+                  DATA_DEVICE=""
+                  for dev in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
+                    if [ -b "$dev" ]; then
+                      DATA_DEVICE="$dev"
+                      break
+                    fi
+                  done
+                  if [ -z "$DATA_DEVICE" ]; then
+                    DATA_DEVICE=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | grep -v "$(findmnt -n -o SOURCE / | sed 's/p[0-9]*$//')" | head -1)
+                  fi
+
+                  if [ -n "$DATA_DEVICE" ] && [ -b "$DATA_DEVICE" ]; then
+                    if ! blkid "$DATA_DEVICE" | grep -q ext4; then
+                      echo "Formatting $DATA_DEVICE..."
+                      mkfs.ext4 -L openclaw-data "$DATA_DEVICE"
+                    fi
+                    mkdir -p /data
+                    mount "$DATA_DEVICE" /data || true
+                    grep -q "$DATA_DEVICE" /etc/fstab || \
+                      echo "$DATA_DEVICE /data ext4 defaults,nofail 0 2" >> /etc/fstab
+                    mkdir -p /data/openclaw
+                    chown ubuntu:ubuntu /data/openclaw
+                    [ -L /home/ubuntu/.openclaw ] || ln -sf /data/openclaw /home/ubuntu/.openclaw
+                  fi
+
+                  # Wait for egress path (Network Firewall endpoint may still be provisioning)
+                  echo "[*] Waiting for internet reachability..."
+                  for i in $(seq 1 60); do
+                    if curl -s --max-time 5 -o /dev/null -w "%{http_code}" https://archive.ubuntu.com/ | grep -qE "^(2|3)"; then
+                      echo "Internet reachable after $i attempts"
+                      break
+                    fi
+                    sleep 10
+                  done
+
+                  # System update
+                  echo "[1/9] Updating system..."
+                  apt-get update
+                  apt-get upgrade -y
+                  apt-get install -y unzip curl
+
+                  # Detect region and instance ID (IMDSv2)
+                  echo "[*] Detecting instance metadata..."
+                  IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
+                  if [ -n "$IMDS_TOKEN" ]; then
+                    AWS_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
+                    INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
+                  else
+                    AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
+                    INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
+                  fi
+                  # Bash default-expansion syntax is not valid inside Fn::Sub because
+                  # the escaped variable name may only contain alphanumeric, underscore,
+                  # period, and colon. Using plain if-blocks instead.
+                  if [ -z "$AWS_REGION" ]; then
+                    AWS_REGION="${AWS::Region}"
+                  fi
+                  if [ -z "$INSTANCE_ID" ]; then
+                    INSTANCE_ID="unknown"
+                  fi
+                  echo "Region: $AWS_REGION | Instance: $INSTANCE_ID"
+
+                  # Install AWS CLI v2
+                  echo "[2/9] Installing AWS CLI..."
+                  curl "https://awscli.amazonaws.com/awscli-exe-linux-$(arch).zip" -o "awscliv2.zip"
+                  unzip -q awscliv2.zip
+                  ./aws/install
+                  rm -rf aws awscliv2.zip
+
+                  # SSM Agent
+                  echo "[3/9] Configuring SSM Agent..."
+                  snap start amazon-ssm-agent || systemctl start amazon-ssm-agent
+
+                  # Docker (conditional)
+                  if [ "${EnableSandbox}" = "true" ]; then
+                    echo "[4/9] Installing Docker..."
+                    install -m 0755 -d /etc/apt/keyrings
+                    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+                    chmod a+r /etc/apt/keyrings/docker.asc
+                    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+                    apt-get update
+                    apt-get install -y docker-ce docker-ce-cli containerd.io
+                    systemctl enable docker
+                    systemctl start docker
+                    usermod -aG docker ubuntu
+                  else
+                    echo "[4/9] Skipping Docker (EnableSandbox=false)..."
+                  fi
+
+                  # Install Node.js
+                  echo "[5/9] Installing Node.js..."
+                  sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
+                  cd ~
+                  NVM_VERSION="v0.40.1"
+                  for i in 1 2 3; do
+                    curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${!NVM_VERSION}/install.sh" -o /tmp/nvm-install.sh && break
+                    echo "NVM download attempt $i failed, retrying in 5s..."
+                    sleep 5
+                  done
+                  bash /tmp/nvm-install.sh
+                  rm -f /tmp/nvm-install.sh
+
+                  export NVM_DIR="$HOME/.nvm"
+                  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+                  nvm install 22
+                  nvm use 22
+                  nvm alias default 22
+
+                  # CodeArtifact npm wrapper: shadow the real npm with a
+                  # 3-line script that refreshes the auth token on every call.
+                  # No timer, no 12h TTL math — always fresh. Runs as ubuntu
+                  # so .npmrc gets written to /home/ubuntu/.npmrc where the
+                  # gateway (also ubuntu) will read it at runtime-install time.
+                  if [ "${UseCodeArtifact}" = "true" ]; then
+                    NODE_BIN_DIR=$(dirname $(nvm which default))
+                    if [ -f "${!NODE_BIN_DIR}/npm" ] && [ ! -f "${!NODE_BIN_DIR}/npm-real" ]; then
+                      mv "${!NODE_BIN_DIR}/npm" "${!NODE_BIN_DIR}/npm-real"
+                    fi
+                    # Write the wrapper via printf to avoid a column-0 heredoc
+                    # that would break the YAML block literal.
+                    # CRITICAL: `aws codeartifact login --tool npm` internally
+                    # shells `npm config set registry ...`. Without the
+                    # _NPM_CA_REFRESH_DONE sentinel, that npm call would hit
+                    # this wrapper, which would call aws codeartifact login
+                    # again, recursing into a process explosion that pegs CPU
+                    # and starves the SSM agent.
+                    # Refresh logic: only when .npmrc is missing or >11h old
+                    # (CodeArtifact tokens are valid 12h). Recursive invocations
+                    # (triggered by the aws cli internally) see the sentinel
+                    # and skip — they just exec npm-real and return.
+                    printf '%s\n' \
+                      '#!/bin/bash' \
+                      'if [ -z "$_NPM_CA_REFRESH_DONE" ]; then' \
+                      '  NPMRC="$HOME/.npmrc"' \
+                      '  AGE=999999' \
+                      '  [ -f "$NPMRC" ] && AGE=$(( $(date +%s) - $(stat -c %Y "$NPMRC") ))' \
+                      '  if [ "$AGE" -gt 39600 ]; then' \
+                      "    _NPM_CA_REFRESH_DONE=1 aws codeartifact login --tool npm --domain ${AWS::StackName}-artifacts --repository npm-cache --region ${AWS::Region} >/dev/null 2>&1 || true" \
+                      '  fi' \
+                      'fi' \
+                      'exec "$(dirname "$0")/npm-real" "$@"' \
+                      > "${!NODE_BIN_DIR}/npm"
+                    chmod +x "${!NODE_BIN_DIR}/npm"
+                    # Prime .npmrc so the very first npm call already has auth.
+                    aws codeartifact login --tool npm \
+                      --domain "${AWS::StackName}-artifacts" \
+                      --repository "npm-cache" \
+                      --region "${AWS::Region}" || true
+                  else
+                    npm config set registry https://registry.npmjs.org/
+                  fi
+
+                  OPENCLAW_VERSION="${OpenClawVersion}"
+                  # 2026.4.5+ requires native module builds (e.g. @buape/carbon),
+                  # so --ignore-scripts is intentionally NOT passed.
+                  npm install -g openclaw@$OPENCLAW_VERSION --timeout=300000 || {
+                    npm cache clean --force
+                    npm install -g openclaw@$OPENCLAW_VERSION --timeout=300000
+                  }
+
+                  if ! grep -q 'NVM_DIR' ~/.bashrc; then
+                      echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
+                      echo '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> ~/.bashrc
+                  fi
+                  UBUNTU_SCRIPT
+
+                  # Create openclaw wrapper
+                  OPENCLAW_MJS=$(find /home/ubuntu/.nvm -path "*/node_modules/openclaw/openclaw.mjs" 2>/dev/null | head -1)
+                  NODE_BIN=$(find /home/ubuntu/.nvm -name node -type f 2>/dev/null | head -1)
+                  if [ -z "$OPENCLAW_MJS" ] || [ -z "$NODE_BIN" ]; then
+                    echo "FATAL: openclaw or node not found"
+                    exit 1
+                  fi
+                  echo "#!/bin/bash" > /usr/local/bin/openclaw
+                  echo "exec $NODE_BIN $OPENCLAW_MJS \"\$@\"" >> /usr/local/bin/openclaw
+                  chmod +x /usr/local/bin/openclaw
+
+                  if ! /usr/local/bin/openclaw --version 2>/dev/null; then
+                    echo "FATAL: openclaw wrapper cannot execute"
+                    exit 1
+                  fi
+                  echo "openclaw verified: $(/usr/local/bin/openclaw --version)"
+
+                  # Configure AWS region
+                  echo "[6/9] Configuring AWS..."
+                  sudo -u ubuntu mkdir -p /home/ubuntu/.aws
+                  sudo -u ubuntu bash -c "printf '[default]\nregion = %s\noutput = json\n' \"$AWS_REGION\" > /home/ubuntu/.aws/config"
+                  chown -R ubuntu:ubuntu /home/ubuntu/.aws
+                  chmod 600 /home/ubuntu/.aws/config
+
+                  # Environment variables
+                  echo "[7/9] Configuring environment variables..."
+                  {
+                    echo "export AWS_REGION=$AWS_REGION"
+                    echo "export AWS_DEFAULT_REGION=$AWS_REGION"
+                    echo "export AWS_PROFILE=default"
+                    echo "export OPENCLAW_MODEL=${OpenClawModel}"
+                    echo "export OPENCLAW_USE_BEDROCK=true"
+                  } >> /home/ubuntu/.bashrc
+
+                  sudo -u ubuntu mkdir -p /home/ubuntu/.config/environment.d
+                  sudo -u ubuntu bash -c "{ echo AWS_REGION=$AWS_REGION; echo AWS_DEFAULT_REGION=$AWS_REGION; echo AWS_PROFILE=default; } > /home/ubuntu/.config/environment.d/aws.conf"
+
+                  loginctl enable-linger ubuntu
+                  systemctl start user@1000.service
+
+                  # Configure OpenClaw
+                  echo "[8/9] Configuring OpenClaw..."
+                  sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw
+
+                  # Write .env for Bedrock IAM auth — survives gateway install/reinstall
+                  # OpenClaw 2026.4.5+ uses pi-coding-agent which needs AWS_PROFILE
+                  # to discover IAM credentials from EC2 instance profile (IMDS)
+                  sudo -u ubuntu bash -c "printf 'AWS_PROFILE=default\nAWS_REGION=$AWS_REGION\nAWS_DEFAULT_REGION=$AWS_REGION\n' > /home/ubuntu/.openclaw/.env"
+
+                  GATEWAY_TOKEN=$(openssl rand -hex 24)
+
+                  # Modern plugin-based config (plugins.entries with auto-discovery).
+                  # See https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/blob/main/UPGRADE.md
+                  cp /opt/openclaw/openclaw-config.json /home/ubuntu/.openclaw/openclaw.json
+                  chown ubuntu:ubuntu /home/ubuntu/.openclaw/openclaw.json
+                  sed -i "s/GATEWAY_TOKEN_PLACEHOLDER/$GATEWAY_TOKEN/g" /home/ubuntu/.openclaw/openclaw.json
+                  sed -i "s|MODEL_ID_PLACEHOLDER|${OpenClawModel}|g" /home/ubuntu/.openclaw/openclaw.json
+
+                  # Install and start gateway
+                  for i in $(seq 1 15); do
+                    if [ -S /run/user/1000/bus ]; then
+                      echo "User systemd session ready"
+                      break
+                    fi
+                    echo "Waiting for user session... $i/15"
+                    sleep 2
+                  done
+
+                  sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash -c '
+                  export HOME=/home/ubuntu
+                  export NVM_DIR="$HOME/.nvm"
+                  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                  openclaw gateway install || echo "Gateway install failed"
+                  systemctl --user start openclaw-gateway.service || { openclaw gateway & } || echo "Gateway start failed"
+                  '
+
+                  # Wait for daemon
+                  echo "Waiting for OpenClaw daemon..."
+                  for i in $(seq 1 30); do
+                    if ss -tlnp 2>/dev/null | grep -q ':18789'; then
+                      echo "OpenClaw daemon is up on port 18789"
+                      break
+                    fi
+                    echo "Attempt $i/30: waiting..."
+                    sleep 2
+                  done
+
+                  if ! ss -tlnp 2>/dev/null | grep -q ':18789'; then
+                    echo "WARNING: Gateway did not start, trying fallback..."
+                    sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
+                    export HOME=/home/ubuntu
+                    export NVM_DIR="$HOME/.nvm"
+                    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                    systemctl --user restart openclaw-gateway.service || openclaw gateway &
+                    '
+                    sleep 5
+                  fi
+
+                  # Enable messaging channels
+                  echo "[8.5/9] Enabling messaging channels..."
+                  sudo -H -u ubuntu bash -c '
+                  export HOME=/home/ubuntu
+                  export NVM_DIR="$HOME/.nvm"
+                  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                  openclaw plugins enable whatsapp || echo "WhatsApp plugin enable failed"
+                  openclaw plugins enable telegram || echo "Telegram plugin enable failed"
+                  openclaw plugins enable discord || echo "Discord plugin enable failed"
+                  openclaw plugins enable slack || echo "Slack plugin enable failed"
+                  npm install -g openclaw-feishu@latest --timeout=60000 2>/dev/null || echo "Feishu plugin install skipped"
+                  npm install -g openclaw-wechat@latest --timeout=60000 2>/dev/null || echo "WeChat plugin install skipped"
+                  '
+
+                  # Copy SOUL.md
+                  cp /opt/openclaw/SOUL.md /home/ubuntu/.openclaw/SOUL.md
+                  chown ubuntu:ubuntu /home/ubuntu/.openclaw/SOUL.md
+
+                  # Save token to SSM Parameter Store
+                  STACK_NAME="${AWS::StackName}"
+                  aws ssm put-parameter \
+                    --name "/openclaw/$STACK_NAME/gateway-token" \
+                    --value "$GATEWAY_TOKEN" \
+                    --type "SecureString" \
+                    --region $AWS_REGION \
+                    --overwrite || echo "Failed to save token to SSM"
+                  unset GATEWAY_TOKEN
+
+                  # Save instance info
+                  echo "$INSTANCE_ID" > /home/ubuntu/.openclaw/instance_id.txt
+                  echo "$AWS_REGION" > /home/ubuntu/.openclaw/region.txt
+
+                  # Copy SSM access script
+                  cp /opt/openclaw/ssm-portforward.sh /home/ubuntu/ssm-portforward.sh
+                  chown ubuntu:ubuntu /home/ubuntu/ssm-portforward.sh
+
+                  # Signal CloudFormation
+                  echo "[9/9] Signaling CloudFormation..."
+                  echo "SUCCESS" > /home/ubuntu/.openclaw/setup_status.txt
+                  echo "Setup completed: $(date)" >> /home/ubuntu/.openclaw/setup_status.txt
+
+                  # Read token back from SSM for cfn-signal (so CloudFormation Outputs can build the access URL)
+                  CFN_TOKEN=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/gateway-token" --with-decryption --query Parameter.Value --output text --region $AWS_REGION 2>/dev/null || echo "TOKEN_UNAVAILABLE")
+
+                  CFN_SIGNAL=$(which cfn-signal 2>/dev/null || find /usr -name cfn-signal 2>/dev/null | head -1)
+                  if [ -n "$CFN_SIGNAL" ]; then
+                    $CFN_SIGNAL -e 0 -d "$CFN_TOKEN" -r "OpenClaw ready" '${OpenClawWaitHandle}'
+                  else
+                    SIGNAL_JSON="{\"Status\":\"SUCCESS\",\"Reason\":\"OpenClaw ready\",\"UniqueId\":\"openclaw\",\"Data\":\"$CFN_TOKEN\"}"
+                    curl -X PUT -H "Content-Type:" --data-binary "$SIGNAL_JSON" "${OpenClawWaitHandle}"
+                  fi
+                  unset CFN_TOKEN
+
+                  echo "=========================================="
+                  echo "OpenClaw installation complete!"
+                  echo "=========================================="
+              mode: "000755"
+              owner: root
+              group: root
+        run_setup:
+          commands:
+            01_run_setup:
+              command: "/opt/openclaw/setup.sh"
+              ignoreErrors: false
+    Properties:
+      ImageId: !Sub 
+        - '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/${Arch}/hvm/ebs-gp3/ami-id}}'
+        - Arch: !FindInMap [ArchitectureMap, !Ref InstanceType, Arch]
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
+      IamInstanceProfile: !Ref OpenClawInstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+        HttpEndpoint: enabled
+      Volumes:
+        - Device: /dev/sdf
+          VolumeId: !If [ProtectData, !Ref OpenClawDataVolumeRetained, !Ref OpenClawDataVolumeNotRetained]
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: !If [EnableFirewall, false, true]
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref OpenClawSecurityGroup
+          SubnetId: !If [EnableFirewall, !Ref PrivateSubnet, !Ref PublicSubnet]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Minimal bootstrap — installs cfn-init, then delegates to Metadata::Init
+          set -e
+          exec > >(tee /var/log/openclaw-bootstrap.log) 2>&1
+          echo "Bootstrap start: $(date)"
+          export DEBIAN_FRONTEND=noninteractive
+
+          # Wait for egress path to be ready before calling apt/pip.
+          # When Network Firewall is enabled, the firewall endpoint can take
+          # 10-15 minutes to become ACTIVE after the instance has booted.
+          echo "Waiting for internet reachability..."
+          for i in $(seq 1 120); do
+            if curl -s --max-time 5 -o /dev/null https://archive.ubuntu.com/; then
+              echo "Internet reachable after $i attempts"
+              break
+            fi
+            sleep 10
+          done
+
+          # Ubuntu 24.04 AMIs default to the regional EC2 mirror
+          # (e.g. eu-west-1.ec2.ports.ubuntu.com), which does not respond when the
+          # instance sits behind NAT Gateway + Network Firewall. Rewrite sources
+          # to the canonical mirror, which does respond. Covers DEB822 and legacy.
+          for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+            [ -f "$f" ] || continue
+            sed -i -E 's#[a-z0-9-]+\.ec2\.(archive|ports)\.ubuntu\.com#\1.ubuntu.com#g' "$f"
+          done
+
+          apt-get update -q
+          apt-get install -y -q python3-pip
+          pip3 install --break-system-packages https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+          CFN_INIT=$(which cfn-init 2>/dev/null || find /usr -name cfn-init 2>/dev/null | head -1)
+          if [ -z "$CFN_INIT" ]; then
+            echo "FATAL: cfn-init not found after install"
+            exit 1
+          fi
+          echo "Running cfn-init..."
+          $CFN_INIT -v --stack ${AWS::StackName} --resource OpenClawInstance --region ${AWS::Region} --configsets default
+          echo "Bootstrap complete: $(date)"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance"
+
+Outputs:
+  Step1InstallSSMPlugin:
+    Description: "STEP 1: Install SSM Session Manager Plugin on your local computer (Option 2: go to EC2 Console > right-click instance > Connect > Session Manager to get a shell, then run 'sudo su - ubuntu && openclaw gateway status' to set up IM channels)"
+    Value: "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+
+  Step2PortForwarding:
+    Description: "STEP 2: Run this command on LOCAL computer (keep terminal open)"
+    Value: !Sub |
+      aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
+
+  Step3AccessURL:
+    Description: "STEP 3: Open this URL in browser"
+    Value: !Sub
+      - "http://localhost:18789/?token=${Token}"
+      - Token: !Select [3, !Split ['"', !GetAtt OpenClawWaitCondition.Data]]
+
+  Step4StartChatting:
+    Description: "STEP 4: Start using OpenClaw!"
+    Value: "Connect WhatsApp, Telegram, Discord. See README: https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock"
+
+  InstanceId:
+    Description: "EC2 Instance ID (for reference)"
+    Value: !Ref OpenClawInstance
+
+  BedrockModel:
+    Description: "Bedrock model in use"
+    Value: !Ref OpenClawModel
+
+  MonthlyCost:
+    Description: "Estimated monthly cost (USD)"
+    Value: !Sub
+      - |
+        EC2 (${InstanceType}): ~$20-40 (Graviton instances 20% cheaper)
+        EBS (30GB): ~$2.40
+        VPC Endpoints: ${EndpointCost}
+        Network Firewall + NAT: ${FirewallCost}
+        Bedrock: Pay-per-use
+        Total: ~${TotalCost}/month
+        Note: Graviton (ARM64) instances offer better price-performance ratio
+      - EndpointCost: !If [CreateEndpoints, "~$29 ($0.01/hour x 5 endpoints)", "$0"]
+        FirewallCost: !If [EnableFirewall, "~$395 firewall + ~$32 NAT + data processing", "$0"]
+        TotalCost: !If [EnableFirewall, "$480-500", !If [CreateEndpoints, "$45-65", "$23-43"]]
+
+  InstanceArchitecture:
+    Description: "Instance architecture"
+    Value: !FindInMap [ArchitectureMap, !Ref InstanceType, Arch]
+
+  DataVolumeIdRetained:
+    Condition: ProtectData
+    Description: "Data volume ID (retained on stack delete)"
+    Value: !Ref OpenClawDataVolumeRetained
+
+  DataVolumeIdNotRetained:
+    Condition: DeleteData
+    Description: "Data volume ID (deleted with stack)"
+    Value: !Ref OpenClawDataVolumeNotRetained
