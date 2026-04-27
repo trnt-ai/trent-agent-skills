@@ -11,6 +11,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 OPENCLAW_ROOT="${OPENCLAW_ROOT:-$HOME/.openclaw}"
+# Canonicalize before anything writes paths into openclaw.json — OpenClaw's exec
+# policy refuses workspace paths that traverse a symlink, and ~/.openclaw is a
+# symlink to /data/openclaw on AWS deployments.
+mkdir -p "$OPENCLAW_ROOT"
+OPENCLAW_ROOT="$(cd "$OPENCLAW_ROOT" && pwd -P)"
 CONFIG_PATH="$OPENCLAW_ROOT/openclaw.json"
 
 AGENTS_ROOT="$OPENCLAW_ROOT/agents"
@@ -248,7 +253,11 @@ const appIdVal = process.env.GITHUB_APP_ID_VAL;
 const installIdVal = process.env.GITHUB_INSTALLATION_ID_VAL;
 
 const desiredAgents = [
-  { id: 'orchestrator',    workspace: path.join(openclawRoot, 'agents', 'orchestrator') },
+  {
+    id: 'orchestrator',
+    workspace: path.join(openclawRoot, 'agents', 'orchestrator'),
+    subagents: { allowAgents: ['change-scanner', 'doc-classifier', 'doc-publisher'] },
+  },
   { id: 'change-scanner',  workspace: path.join(openclawRoot, 'agents', 'change-scanner') },
   { id: 'doc-classifier',  workspace: path.join(openclawRoot, 'agents', 'doc-classifier') },
   { id: 'doc-publisher',   workspace: path.join(openclawRoot, 'agents', 'doc-publisher') },
@@ -277,6 +286,10 @@ for (const desired of desiredAgents) {
   if ('env' in entry) {
     delete entry.env;
     console.log(`  Removed invalid env block from agent: ${desired.id}`);
+  }
+  if (desired.subagents) {
+    entry.subagents = desired.subagents;
+    console.log(`  Set subagents.allowAgents on ${desired.id}: ${desired.subagents.allowAgents.join(', ')}`);
   }
 }
 
