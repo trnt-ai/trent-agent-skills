@@ -9,13 +9,13 @@ apply secret scanning, and hand clean diffs to doc-classifier.
 
 ## Contract of Record
 The canonical shared-file interface is defined in:
-- `~/.openclaw/shared/data/contracts.md`
+- `/data/openclaw/shared/data/contracts.md`
 
 Treat that file as the source of truth for required fields, terminal statuses,
 and overwrite behavior.
 
 ## Repo Configuration
-Read code-to-doc metadata from `~/.openclaw/shared/data/config.json`.
+Read code-to-doc metadata from `/data/openclaw/shared/data/config.json`.
 Use `scanner.repos` as the source of truth.
 
 Expected format:
@@ -46,7 +46,7 @@ If `scanner.repos` is missing or empty, fail the run and write `scan-status.json
 ### 1. Read last run state and compute effective lookback
 Read `WORKING.md` for `last_run` timestamp.
 
-Read `scanner.lookbackHours` from `~/.openclaw/shared/data/config.json`.
+Read `scanner.lookbackHours` from `/data/openclaw/shared/data/config.json`.
 
 Compute:
 - `lookback_since = now - scanner.lookbackHours`
@@ -61,7 +61,7 @@ Use the `github-tools` skill. Mint fresh at the start of each run using:
 - `GITHUB_INSTALLATION_ID`
 - `GITHUB_APP_PRIVATE_KEY_FILE`
 
-Run the helper at `~/.openclaw/skills/github-tools/scripts/mint-token.js`, capture the installation token, and use it as `Bearer {installation_token}` for all GitHub REST API calls in this run.
+Run the helper at `/data/openclaw/skills/github-tools/scripts/mint-token.js`, capture the installation token, and use it as `Bearer {installation_token}` for all GitHub REST API calls in this run.
 
 ### 3. Load repo list from code-to-doc config and fetch merged PRs since effective_since
 For each configured entry in `scanner.repos`:
@@ -100,9 +100,9 @@ If secrets found: log warning to memory, skip that PR, continue.
 
 ### 7. Write output to shared/
 Every run must carry the `run_id` provided by Orchestrator. Copy it into both shared files.
-Write outputs that conform to `~/.openclaw/shared/data/contracts.md`.
+Write outputs that conform to `/data/openclaw/shared/data/contracts.md`.
 
-Write `~/.openclaw/shared/data/scan-results.json`:
+Write `/data/openclaw/shared/data/scan-results.json`:
 ```json
 {
   "run_id": "code-to-doc-2026-04-08T16:39:00Z",
@@ -129,7 +129,7 @@ Write `~/.openclaw/shared/data/scan-results.json`:
 }
 ```
 
-Write `~/.openclaw/shared/data/scan-status.json`:
+Write `/data/openclaw/shared/data/scan-status.json`:
 ```json
 {
   "run_id": "code-to-doc-2026-04-08T16:39:00Z",

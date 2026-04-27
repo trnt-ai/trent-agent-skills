@@ -20,7 +20,7 @@ The manifest is a JSON file with this shape:
   ]
 }
 
-Status is written to $OPENCLAW_DATA_DIR/publish-status.json (default ~/.openclaw/shared/data/).
+Status is written to $OPENCLAW_DATA_DIR/publish-status.json (default /data/openclaw/shared/data/).
 """
 
 import sys

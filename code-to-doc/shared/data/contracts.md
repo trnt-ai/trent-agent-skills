@@ -5,7 +5,7 @@ All stages must read and write these files exactly as the contract of record.
 
 ## Global rules
 
-- Shared directory: `~/.openclaw/shared/data/`
+- Shared directory: `/data/openclaw/shared/data/`
 - Contract files:
   - `scan-status.json`
   - `scan-results.json`

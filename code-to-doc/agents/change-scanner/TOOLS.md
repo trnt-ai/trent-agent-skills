@@ -7,12 +7,12 @@
 - Respect rate limits per skill instructions
 
 ## Shared Output
-- Write to `~/.openclaw/shared/data/` only
+- Write to `/data/openclaw/shared/data/` only
 - `scan-results.json` must be valid JSON array (empty array if nothing found)
 - `scan-status.json` must always be written
 
 ## Config
-- Read code-to-doc metadata from `~/.openclaw/shared/data/config.json`
+- Read code-to-doc metadata from `/data/openclaw/shared/data/config.json`
 - Source of truth for scanner inputs: `scanner.repos`
 - Format: array of strings like `trnt-ai/trent-openclaw-security-assessment`
 

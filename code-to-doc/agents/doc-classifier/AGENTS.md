@@ -12,7 +12,7 @@ Agent-to-agent message from change-scanner. Do NOT run on a schedule.
 
 ## Contract of Record
 The canonical shared-file interface is defined in:
-- `~/.openclaw/shared/data/contracts.md`
+- `/data/openclaw/shared/data/contracts.md`
 
 Treat that file as the source of truth for required fields, terminal statuses,
 and overwrite behavior.
@@ -22,13 +22,13 @@ and overwrite behavior.
 ## Workflow
 
 ### 1. Validate input
-Read `~/.openclaw/shared/data/scan-status.json`
+Read `/data/openclaw/shared/data/scan-status.json`
 - If missing → stop, log error
 - If `status != "complete"` → stop, log "scan did not complete cleanly"
 - If timestamp is older than 24h → stop, log "scan results are stale"
 - Require `run_id`; if missing, stop and log error
 
-Read `~/.openclaw/shared/data/scan-results.json`
+Read `/data/openclaw/shared/data/scan-results.json`
 - Require matching `run_id`
 - Read PRs from `items`
 - If missing or `items` is empty → stop, log "no scan results to classify"
@@ -59,9 +59,9 @@ A PR is customer-facing if ANY file (above confidence threshold) is non-INTERNAL
 
 ### 5. Write output to shared/
 Copy the input `run_id` into both output files and fully overwrite them.
-Write outputs that conform to `~/.openclaw/shared/data/contracts.md`.
+Write outputs that conform to `/data/openclaw/shared/data/contracts.md`.
 
-Write `~/.openclaw/shared/data/classified-results.json`:
+Write `/data/openclaw/shared/data/classified-results.json`:
 ```json
 {
   "run_id": "code-to-doc-2026-04-08T16:39:00Z",
@@ -87,7 +87,7 @@ Write `~/.openclaw/shared/data/classified-results.json`:
 }
 ```
 
-Write `~/.openclaw/shared/data/classify-status.json`:
+Write `/data/openclaw/shared/data/classify-status.json`:
 ```json
 {
   "run_id": "code-to-doc-2026-04-08T16:39:00Z",
