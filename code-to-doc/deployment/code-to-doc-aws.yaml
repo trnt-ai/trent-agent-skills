@@ -977,7 +977,20 @@ Resources:
                       echo "$DATA_DEVICE /data ext4 defaults,nofail 0 2" >> /etc/fstab
                     mkdir -p /data/openclaw
                     chown ubuntu:ubuntu /data/openclaw
-                    [ -L /home/ubuntu/.openclaw ] || ln -sf /data/openclaw /home/ubuntu/.openclaw
+                    # Bind-mount the EBS volume at $HOME/.openclaw. A symlink
+                    # would trip OpenClaw's exec-approvals policy, which refuses
+                    # to traverse symlinks ("Refusing to traverse symlink in
+                    # exec approvals path"). A bind mount makes the path a real
+                    # directory backed by /data/openclaw.
+                    if [ -L /home/ubuntu/.openclaw ]; then
+                      rm /home/ubuntu/.openclaw
+                    fi
+                    mkdir -p /home/ubuntu/.openclaw
+                    chown ubuntu:ubuntu /home/ubuntu/.openclaw
+                    findmnt -M /home/ubuntu/.openclaw >/dev/null 2>&1 || \
+                      mount --bind /data/openclaw /home/ubuntu/.openclaw
+                    grep -q ' /home/ubuntu/.openclaw ' /etc/fstab || \
+                      echo '/data/openclaw /home/ubuntu/.openclaw none bind,nofail,x-systemd.requires=/data 0 0' >> /etc/fstab
                   fi
 
                   # Wait for egress path (Network Firewall endpoint may still be provisioning)

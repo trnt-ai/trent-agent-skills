@@ -12,8 +12,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 OPENCLAW_ROOT="${OPENCLAW_ROOT:-$HOME/.openclaw}"
 # Canonicalize before anything writes paths into openclaw.json — OpenClaw's exec
-# policy refuses workspace paths that traverse a symlink, and ~/.openclaw is a
-# symlink to /data/openclaw on AWS deployments.
+# policy refuses workspace paths that traverse a symlink. AWS deploys now use a
+# bind mount, so this is a no-op there; the call remains as a safety net for
+# any environment where OPENCLAW_ROOT is reached via a symlink.
 mkdir -p "$OPENCLAW_ROOT"
 OPENCLAW_ROOT="$(cd "$OPENCLAW_ROOT" && pwd -P)"
 CONFIG_PATH="$OPENCLAW_ROOT/openclaw.json"
