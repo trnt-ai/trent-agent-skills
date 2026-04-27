@@ -20,11 +20,11 @@ cron → Orchestrator → change-scanner → doc-classifier → doc-publisher
 You are the entry point. The code-to-doc agents do their work and report back via shared files.
 
 ### Shared files (read these to check status)
-- `/data/openclaw/shared/data/scan-status.json` — change-scanner run status
-- `/data/openclaw/shared/data/scan-results.json` — clean PR diffs ready for classification
-- `/data/openclaw/shared/data/classify-status.json` — doc-classifier run status
-- `/data/openclaw/shared/data/classified-results.json` — classified changes
-- `/data/openclaw/shared/data/publish-status.json` — doc-publisher run status
+- `~/.openclaw/shared/data/scan-status.json` — change-scanner run status
+- `~/.openclaw/shared/data/scan-results.json` — clean PR diffs ready for classification
+- `~/.openclaw/shared/data/classify-status.json` — doc-classifier run status
+- `~/.openclaw/shared/data/classified-results.json` — classified changes
+- `~/.openclaw/shared/data/publish-status.json` — doc-publisher run status
 
 Canonical schema and field requirements live in:
 - `shared/data/contracts.md`
