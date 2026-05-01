@@ -331,8 +331,13 @@ Resources:
             pass http any any -> any any (http.host; dotprefix; content:".openai.com"; endswith; msg:"allow .openai.com http"; flow:to_server, established; sid:10008; rev:1;)
             pass tls any any -> any any (tls.sni; dotprefix; content:".chatgpt.com"; endswith; msg:"allow .chatgpt.com (Codex CLI backend)"; flow:to_server, established; sid:10025; rev:1;)
             pass http any any -> any any (http.host; dotprefix; content:".chatgpt.com"; endswith; msg:"allow .chatgpt.com http"; flow:to_server, established; sid:10026; rev:1;)
-            pass tls any any -> any any (tls.sni; dotprefix; content:".amazonaws.com"; endswith; msg:"allow .amazonaws.com"; flow:to_server, established; sid:10009; rev:1;)
-            pass http any any -> any any (http.host; dotprefix; content:".amazonaws.com"; endswith; msg:"allow .amazonaws.com http"; flow:to_server, established; sid:10010; rev:1;)
+            # Cross-region S3 paths only — same-region S3 goes via the gateway VPCE
+            # and never hits the firewall. Covers cfn-bootstrap tarball and AWS CLI
+            # installer (hosted in us-east-1, accessed via global S3 endpoint).
+            pass tls any any -> any any (tls.sni; content:"s3.amazonaws.com"; endswith; msg:"allow s3.amazonaws.com"; flow:to_server, established; sid:10009; rev:1;)
+            pass http any any -> any any (http.host; content:"s3.amazonaws.com"; endswith; msg:"allow s3.amazonaws.com http"; flow:to_server, established; sid:10010; rev:1;)
+            pass tls any any -> any any (tls.sni; content:"awscli.amazonaws.com"; startswith; endswith; msg:"allow awscli.amazonaws.com"; flow:to_server, established; sid:10027; rev:1;)
+            pass http any any -> any any (http.host; content:"awscli.amazonaws.com"; startswith; endswith; msg:"allow awscli.amazonaws.com http"; flow:to_server, established; sid:10028; rev:1;)
             pass tls any any -> any any (tls.sni; dotprefix; content:".docker.com"; endswith; msg:"allow .docker.com"; flow:to_server, established; sid:10011; rev:1;)
             pass http any any -> any any (http.host; dotprefix; content:".docker.com"; endswith; msg:"allow .docker.com http"; flow:to_server, established; sid:10012; rev:1;)
             pass tls any any -> any any (tls.sni; dotprefix; content:".npmjs.org"; endswith; msg:"allow .npmjs.org"; flow:to_server, established; sid:10013; rev:1;)
@@ -622,6 +627,68 @@ Resources:
         - !Ref PrivateSubnet2
       SecurityGroupIds:
         - !Ref VPCEndpointSecurityGroup
+
+  # STS VPCE — `aws codeartifact login` calls sts:GetServiceBearerToken;
+  # also covers IAM role session refresh. Without this, those calls would
+  # need ".amazonaws.com" in the firewall allow-list (overly broad).
+  STSVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sts'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # EC2 API VPCE — used by the SSM port-forward helper (ec2:DescribeTags).
+  EC2VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # CloudFormation VPCE — cfn-init reads stack metadata, cfn-signal posts back.
+  CloudFormationVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.cloudformation'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # S3 Gateway VPCE — free, attaches to route tables so the S3 prefix-list
+  # route bypasses the firewall for same-region S3 traffic. Cross-region S3
+  # (e.g. cfn-bootstrap tarball, AWS CLI installer hosted in us-east-1) still
+  # traverses the public path and is handled by a narrowed firewall rule.
+  S3GatewayVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !If [EnableFirewall, !Ref PrivateRouteTable, !Ref AWS::NoValue]
 
   # CodeArtifact API: for GetAuthorizationToken, GetRepositoryEndpoint.
   CodeArtifactAPIVPCEndpoint:
