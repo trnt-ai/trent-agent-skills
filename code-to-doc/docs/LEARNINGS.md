@@ -201,6 +201,27 @@ OpenClaw's plugin auto-discovery enumerates inference profiles via `bedrock:List
 
 **Why I initially defaulted to bare IDs:** I assumed bare IDs were universally compatible. They're not — Bedrock changed this around the Claude 3 family. The template default is now `eu.anthropic.claude-sonnet-4-5-20250929-v1:0`.
 
+## Open follow-ups
+
+### 27. Cross-region S3 still requires a public-path firewall rule (custom AMI deferred)
+
+**Where we are today.** The egress firewall used to allow `.amazonaws.com` — far too broad (any AWS service, any account). The current template tightens this by routing AWS-internal traffic through interface VPCEs (`sts`, `ec2`, `cloudformation`, plus the existing Bedrock/SSM/CodeArtifact ones) and by adding the free **S3 Gateway VPCE** for same-region S3. The firewall now only allows two narrow public-path FQDNs:
+
+- `s3.amazonaws.com` (any S3 bucket, but only S3 — not DynamoDB, EC2, etc.)
+- `awscli.amazonaws.com` (specific to the AWS CLI installer)
+
+**Why those two are still public.** Both point at assets in `us-east-1` accessed via AWS's global endpoints. The S3 *Gateway* VPCE is regional — it only routes traffic to S3 buckets in the same region as the VPC. The `cloudformation-examples` bucket (where `aws-cfn-bootstrap-py3-latest.tar.gz` lives) and the AWS CLI installer (CloudFront-fronted, but the origin is a us-east-1 bucket) are both cross-region for any non-`us-east-1` deploy. Cross-region S3 traffic still goes via internet, so we keep them in the firewall allow-list.
+
+**The proper fix — defer.** Pre-bake AWS CLI v2 and `aws-cfn-bootstrap` into a custom AMI built with Packer or EC2 Image Builder. With the AMI shipping these artifacts, both downloads at boot disappear, and we can remove `s3.amazonaws.com` and `awscli.amazonaws.com` from the firewall entirely. The remaining egress would be: GitHub, npmjs (via CodeArtifact, never direct), Anthropic/OpenAI (if used), Ubuntu mirrors (via apt at boot), pypi (only if cfn-bootstrap is fetched at boot — which the AMI eliminates).
+
+**What that AMI work involves.**
+- Packer template that starts from the official Ubuntu 24.04 ARM64 AMI, runs apt updates, installs AWS CLI v2 from a controlled location, installs the cfn-bootstrap wheel, snapshots.
+- CI pipeline to rebuild the AMI when AWS CLI / cfn-bootstrap publishes a new version.
+- AMI ID stored in SSM Parameter Store; the CFN template reads it via `{{resolve:ssm:...}}`.
+- Estimated effort: 1–2 days for the initial pipeline, near-zero ongoing if we automate rebuilds.
+
+**Why deferred.** The current state — VPCEs for the rest, narrowed firewall to two specific FQDNs — already shrinks the exfil surface from "any AWS service, any account" to "any S3 read + AWS CLI installer." That's a step change. The AMI work closes the last 5%; the first 95% is in this PR.
+
 ## Acceptance test
 
 From inside the instance, after a successful deploy:
