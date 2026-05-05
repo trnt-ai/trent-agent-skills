@@ -5,6 +5,13 @@ set -euo pipefail
 # Usage: bash installer/install.sh
 # Run from the code-to-doc/ directory, or set REPO_ROOT.
 
+# `openclaw gateway restart` (step 8) uses `systemctl --user`, which needs
+# XDG_RUNTIME_DIR pointing at /run/user/<uid>. SSM Session Manager shells
+# don't export it. Override unconditionally — the path is per-uid so
+# computing it locally is always correct, and an externally-set value would
+# only redirect systemd traffic somewhere unexpected.
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+
 # --- paths ---
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
