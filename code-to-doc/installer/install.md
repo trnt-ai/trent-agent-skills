@@ -72,15 +72,25 @@ Recommended default:
 Expected paths:
 - shared: `~/.openclaw/shared/data/`
 - credentials: `~/.openclaw/credentials/`
-- orchestrator workspace: `~/.openclaw/agents/orchestrator`
+- orchestrator workspace: `~/.openclaw/workspace/orchestrator`
+- orchestrator agent state: `~/.openclaw/agents/orchestrator/agent`
 
 ### Phase 5: Agent install
 
-Install or update:
-- `~/.openclaw/agents/orchestrator/`
-- `~/.openclaw/agents/change-scanner/`
-- `~/.openclaw/agents/doc-classifier/`
-- `~/.openclaw/agents/doc-publisher/`
+Install or update agent workspaces (behavioral files: AGENTS.md, SOUL.md, etc.):
+- `~/.openclaw/workspace/orchestrator/`
+- `~/.openclaw/workspace/change-scanner/`
+- `~/.openclaw/workspace/doc-classifier/`
+- `~/.openclaw/workspace/doc-publisher/`
+
+Pre-create per-agent state dirs (OpenClaw populates these at runtime with
+`auth-profiles.json`, model registry, and sessions store):
+- `~/.openclaw/agents/orchestrator/agent/`
+- `~/.openclaw/agents/change-scanner/agent/`
+- `~/.openclaw/agents/doc-classifier/agent/`
+- `~/.openclaw/agents/doc-publisher/agent/`
+
+Also install:
 - shared contract doc
 - code-to-doc config
 - required skills or skill references
