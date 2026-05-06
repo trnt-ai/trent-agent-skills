@@ -27,8 +27,9 @@ OPENCLAW_ROOT="$(cd "$OPENCLAW_ROOT" && pwd -P)"
 CONFIG_PATH="$OPENCLAW_ROOT/openclaw.json"
 
 AGENTS_ROOT="$OPENCLAW_ROOT/agents"
+WORKSPACES_ROOT="$OPENCLAW_ROOT/workspace"
 SHARED_ROOT="$OPENCLAW_ROOT/shared/data"
-SKILLS_ROOT="$OPENCLAW_ROOT/skills"
+SKILLS_ROOT="$WORKSPACES_ROOT/skills"
 
 # --- helpers ---
 
@@ -37,13 +38,14 @@ ok()    { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m!\033[0m %s\n' "$*"; }
 fail()  { printf '\033[1;31m✗\033[0m %s\n' "$*"; exit 1; }
 
-# Excludes common to all agent syncs — never overwrite runtime state
+# Excludes common to all agent syncs — never overwrite runtime state.
+# `agent/` (OpenClaw's per-agent state dir) lives under $AGENTS_ROOT, not under
+# the workspace, so it is no longer a concern for these syncs.
 AGENT_EXCLUDES=(
   --exclude '.openclaw/'
   --exclude 'memory/'
   --exclude 'state/'
   --exclude 'sessions/'
-  --exclude 'agent/'
   --exclude 'WORKING.md'
 )
 
@@ -75,11 +77,19 @@ ok "Source repo verified"
 
 info "Creating directories..."
 
+# Workspace dirs hold the agent's behavioral files (AGENTS.md, SOUL.md, etc.)
+# and are the agent's default cwd. AgentDirs hold OpenClaw-managed per-agent
+# state (auth-profiles.json, model registry, sessions store) and are kept
+# separate per OpenClaw's documented multi-agent layout.
 mkdir -p \
-  "$AGENTS_ROOT/orchestrator" \
-  "$AGENTS_ROOT/change-scanner" \
-  "$AGENTS_ROOT/doc-classifier" \
-  "$AGENTS_ROOT/doc-publisher" \
+  "$WORKSPACES_ROOT/orchestrator" \
+  "$WORKSPACES_ROOT/change-scanner" \
+  "$WORKSPACES_ROOT/doc-classifier" \
+  "$WORKSPACES_ROOT/doc-publisher" \
+  "$AGENTS_ROOT/orchestrator/agent" \
+  "$AGENTS_ROOT/change-scanner/agent" \
+  "$AGENTS_ROOT/doc-classifier/agent" \
+  "$AGENTS_ROOT/doc-publisher/agent" \
   "$SHARED_ROOT" \
   "$SKILLS_ROOT"
 
@@ -89,22 +99,22 @@ info "Syncing agent files..."
 
 rsync -av "${AGENT_EXCLUDES[@]}" \
   "$REPO_ROOT/agents/orchestrator/" \
-  "$AGENTS_ROOT/orchestrator/"
+  "$WORKSPACES_ROOT/orchestrator/"
 
 rsync -av "${AGENT_EXCLUDES[@]}" \
   "$REPO_ROOT/agents/change-scanner/" \
-  "$AGENTS_ROOT/change-scanner/"
+  "$WORKSPACES_ROOT/change-scanner/"
 
 rsync -av "${AGENT_EXCLUDES[@]}" \
   "$REPO_ROOT/agents/doc-classifier/" \
-  "$AGENTS_ROOT/doc-classifier/"
+  "$WORKSPACES_ROOT/doc-classifier/"
 
 rsync -av "${AGENT_EXCLUDES[@]}" \
   --exclude '__pycache__/' \
   --exclude 'generated/' \
   --exclude 'pr_body*.md' \
   "$REPO_ROOT/agents/doc-publisher/" \
-  "$AGENTS_ROOT/doc-publisher/"
+  "$WORKSPACES_ROOT/doc-publisher/"
 
 info "Syncing shared data..."
 
@@ -139,8 +149,8 @@ fi
 # --- 4. create minimal WORKING.md files if missing ---
 
 for f in \
-  "$AGENTS_ROOT/orchestrator/WORKING.md" \
-  "$AGENTS_ROOT/change-scanner/WORKING.md"
+  "$WORKSPACES_ROOT/orchestrator/WORKING.md" \
+  "$WORKSPACES_ROOT/change-scanner/WORKING.md"
 do
   if [ ! -f "$f" ]; then
     cat > "$f" <<'EOF'
@@ -263,12 +273,25 @@ const installIdVal = process.env.GITHUB_INSTALLATION_ID_VAL;
 const desiredAgents = [
   {
     id: 'orchestrator',
-    workspace: path.join(openclawRoot, 'agents', 'orchestrator'),
+    workspace: path.join(openclawRoot, 'workspace', 'orchestrator'),
+    agentDir:  path.join(openclawRoot, 'agents', 'orchestrator', 'agent'),
     subagents: { allowAgents: ['change-scanner', 'doc-classifier', 'doc-publisher'] },
   },
-  { id: 'change-scanner',  workspace: path.join(openclawRoot, 'agents', 'change-scanner') },
-  { id: 'doc-classifier',  workspace: path.join(openclawRoot, 'agents', 'doc-classifier') },
-  { id: 'doc-publisher',   workspace: path.join(openclawRoot, 'agents', 'doc-publisher') },
+  {
+    id: 'change-scanner',
+    workspace: path.join(openclawRoot, 'workspace', 'change-scanner'),
+    agentDir:  path.join(openclawRoot, 'agents', 'change-scanner', 'agent'),
+  },
+  {
+    id: 'doc-classifier',
+    workspace: path.join(openclawRoot, 'workspace', 'doc-classifier'),
+    agentDir:  path.join(openclawRoot, 'agents', 'doc-classifier', 'agent'),
+  },
+  {
+    id: 'doc-publisher',
+    workspace: path.join(openclawRoot, 'workspace', 'doc-publisher'),
+    agentDir:  path.join(openclawRoot, 'agents', 'doc-publisher', 'agent'),
+  },
 ];
 
 const raw = fs.readFileSync(configPath, 'utf8');
@@ -282,6 +305,7 @@ for (const desired of desiredAgents) {
   let entry = config.agents.list.find(a => a && a.id === desired.id);
   if (entry) {
     entry.workspace = desired.workspace;
+    entry.agentDir = desired.agentDir;
     console.log(`  Updated agent: ${desired.id}`);
   } else {
     entry = { ...desired };
@@ -383,11 +407,11 @@ info "Validating installation..."
 
 MISSING=0
 required=(
-  "$AGENTS_ROOT/orchestrator/AGENTS.md"
-  "$AGENTS_ROOT/change-scanner/AGENTS.md"
-  "$AGENTS_ROOT/doc-classifier/AGENTS.md"
-  "$AGENTS_ROOT/doc-publisher/AGENTS.md"
-  "$AGENTS_ROOT/doc-publisher/publish_docs_pr.py"
+  "$WORKSPACES_ROOT/orchestrator/AGENTS.md"
+  "$WORKSPACES_ROOT/change-scanner/AGENTS.md"
+  "$WORKSPACES_ROOT/doc-classifier/AGENTS.md"
+  "$WORKSPACES_ROOT/doc-publisher/AGENTS.md"
+  "$WORKSPACES_ROOT/doc-publisher/publish_docs_pr.py"
   "$SHARED_ROOT/contracts.md"
   "$SHARED_ROOT/config.json"
   "$PEM_PATH"
@@ -428,11 +452,12 @@ fi
 
 echo
 ok "Install complete"
-info "Agents:     $AGENTS_ROOT/{orchestrator,change-scanner,doc-classifier,doc-publisher}"
-info "Skills:     $SKILLS_ROOT/{customer-facing,doc-style,github-tools}"
-info "Config:     $SHARED_ROOT/config.json"
-info "PEM:        $PEM_PATH (chmod 600)"
-info "Registry:   $CONFIG_PATH (GitHub App values set under top-level env)"
+info "Workspaces:  $WORKSPACES_ROOT/{orchestrator,change-scanner,doc-classifier,doc-publisher}"
+info "Agent state: $AGENTS_ROOT/{orchestrator,change-scanner,doc-classifier,doc-publisher}/agent"
+info "Skills:      $SKILLS_ROOT/{customer-facing,doc-style,github-tools}"
+info "Config:      $SHARED_ROOT/config.json"
+info "PEM:         $PEM_PATH (chmod 600)"
+info "Registry:    $CONFIG_PATH (GitHub App values set under top-level env)"
 echo
 info "Next steps:"
 info "  1. Edit $SHARED_ROOT/config.json with your repos (if using template)"
