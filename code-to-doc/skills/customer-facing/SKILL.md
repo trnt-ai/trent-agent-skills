@@ -14,12 +14,14 @@ for customers. This file is the source of truth — edit it to tune the pipeline
 
 ## Products in Scope
 
-| Product | Repo | Surface |
-|---------|------|---------|
-| Threat Assessor | HumberAgent (backend) | REST API, assessment logic, report schemas |
-| AppSec Advisor | HumberAgent (backend) | Chat API, advisor responses |
-| Prompt Guard | HumberAgent (backend) | `/inference` API, analysis schema |
-| Threat Dashboard | threat-dashboard (frontend) | UI behaviors visible to users |
+Use canonical product names from `skills/doc-style/terminology.md` when classifying. The deprecated names appear in legacy code and PRs — translate them.
+
+| Canonical product | Deprecated name | Repo | Surface |
+|-------------------|-----------------|------|---------|
+| Security Assessment | Threat Assessor | HumberAgent (backend) | REST API, assessment logic, report schemas |
+| Security Advisor | AppSec Advisor | HumberAgent (backend) | Chat API, advisor responses |
+| Prompt Guard | — | HumberAgent (backend) | `/inference` API, analysis schema |
+| Threat Dashboard | — | threat-dashboard (frontend) | UI behaviors visible to users |
 
 ---
 

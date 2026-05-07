@@ -9,7 +9,11 @@ Agent-to-agent message from doc-classifier. Do NOT run on a schedule.
 
 ## Skills Used
 - `github-tools` — for all GitHub API calls (read existing docs + create PR)
-- `doc-style` — tone, structure, formatting rules for all generated content
+- `doc-style` — tone, structure, formatting rules for all generated content.
+  Read all three layered files at the start of every run, in order:
+  1. `skills/doc-style/SKILL.md` — voice and formatting rules
+  2. `skills/doc-style/terminology.md` — canonical product, UI, severity, lifecycle names
+  3. `skills/doc-style/section-patterns.md` — page anatomy and reusable section templates
 
 ## Contract of Record
 The canonical shared-file interface is defined in:
@@ -43,6 +47,23 @@ Read `~/.openclaw/shared/data/config.json`
 Do not assume a fixed destination repo. Always defer to `shared/data/config.json`
 for repository, path root, and branch.
 
+**Resolve every `doc_suggestion` against `docs.basePath` once, here.**
+Use the resolved paths in every subsequent step (read-existing, validate,
+manifest, status):
+
+- If `docs.basePath` is `"."` or empty: use the `doc_suggestion` as-is
+  (e.g. `products/foo/quickstart.md`).
+- Otherwise: join with a single `/` separator
+  (e.g. `basePath="gitbook"` + `products/foo/quickstart.md`
+  → `gitbook/products/foo/quickstart.md`).
+
+Reject any `doc_suggestion` that contains `..`, starts with `/`, or
+starts with `./` — these would escape or obscure the docs root. Log the
+run as failed if found.
+
+Where the rest of this file says `{doc_suggestion}`, read it as the
+**resolved** path (`{basePath}/{doc_suggestion}`).
+
 ### 2. Mint GitHub token
 Use the `github-tools` skill with:
 - `GITHUB_APP_ID`
@@ -65,7 +86,13 @@ GET /repos/{docs.repo}/contents/{docs.basePath}?ref={docs.defaultBranch}
 
 ### 4. Generate updated documentation
 
-Apply `doc-style` skill rules strictly.
+Apply `doc-style` skill rules strictly. Before generating, confirm you have
+read all three layered files (`SKILL.md`, `terminology.md`, `section-patterns.md`).
+
+When a source PR mentions a deprecated product name (see the "Products"
+table in `terminology.md`), translate it to the canonical name in the
+generated doc. Quote the deprecated name only when historical accuracy
+matters (for example, in a changelog or migration note).
 
 For each customer-facing PR (grouped by category, highest severity first):
 
@@ -100,18 +127,30 @@ Check each generated doc:
 - Each section references an actual classified change
 - Passes doc-style rules (heading levels, no marketing language)
 
-If validation fails: log error, stop, do NOT create PR.
+**Advisory check — deprecated product names.** Scan the generated content
+for any deprecated names listed in the "Products" table of
+`skills/doc-style/terminology.md` (for example, "Threat Assessor",
+"AppSec Advisor"). If any are found outside changelog or migration
+sections, log a warning to memory listing each occurrence with file and
+line number. Do **not** fail the run on this check — historical
+references in changelogs are legitimate, and a false positive must not
+block the PR.
+
+If validation fails on the blocking checks above (markdown, secrets,
+internal paths, heading levels): log error, stop, do NOT create PR.
 
 ### 6. Create PR on configured docs repo
 
 Build a manifest JSON file and pass it to the helper script. The helper handles
 branch creation, multi-file commits, and PR creation in one invocation.
 
-**Step A — Write each generated doc to a temp file** (one file per doc_suggestion path).
+**Step A — Write each generated doc to a temp file** (one file per resolved doc path).
 
 **Step B — Write the PR body markdown to a temp file.**
 
-**Step C — Build the manifest:**
+**Step C — Build the manifest.** File paths use the **resolved**
+(`basePath`-prepended) form from Step 1. Examples below assume
+`basePath: "."` (paths land at the repo root):
 ```json
 {
   "token": "{installation_token}",
@@ -122,11 +161,16 @@ branch creation, multi-file commits, and PR creation in one invocation.
   "pr_body_file": "/tmp/pr-body.md",
   "run_id": "{run_id}",
   "files": [
-    {"path": "docs/products/foo/quickstart.md", "content_file": "/tmp/foo.md"},
-    {"path": "docs/products/bar/overview.md",   "content_file": "/tmp/bar.md"}
+    {"path": "products/foo/quickstart.md", "content_file": "/tmp/foo.md"},
+    {"path": "products/bar/overview.md",   "content_file": "/tmp/bar.md"}
   ]
 }
 ```
+
+For a deployment with `basePath: "gitbook"`, the same files would appear
+in the manifest as `gitbook/products/foo/quickstart.md` and
+`gitbook/products/bar/overview.md` — and would commit at those paths
+in the docs repo.
 
 **Step D — Run the helper:**
 ```
@@ -185,8 +229,8 @@ On success, write:
   "repo": "trnt-ai/trent-openclaw-security-assessment",
   "branch": "doc-agent/update-2026-04-08",
   "paths": [
-    "docs/products/openclaw-security-assessment/quickstart.md",
-    "docs/products/openclaw-security-assessment/api-reference.md"
+    "products/openclaw-security-assessment/quickstart.md",
+    "products/openclaw-security-assessment/api-reference.md"
   ],
   "pr_url": "https://github.com/trnt-ai/trent-openclaw-security-assessment/pull/16",
   "commit_sha": "..."
@@ -200,10 +244,10 @@ On failure, write:
   "status": "failed",
   "timestamp": "2026-04-08T16:20:00Z",
   "step": "commit_file",
-  "failed_path": "docs/products/openclaw-security-assessment/quickstart.md",
+  "failed_path": "products/openclaw-security-assessment/quickstart.md",
   "repo": "trnt-ai/trent-openclaw-security-assessment",
   "branch": "doc-agent/update-2026-04-08",
-  "paths": ["docs/products/openclaw-security-assessment/quickstart.md"],
+  "paths": ["products/openclaw-security-assessment/quickstart.md"],
   "result": {"...": "..."}
 }
 ```
@@ -229,4 +273,5 @@ Log each run:
 - Docs files updated
 - PR URL
 - Validation failures (if any)
+- Deprecated-name advisory hits (if any), with file and line
 - Skipped changes

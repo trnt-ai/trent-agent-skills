@@ -178,7 +178,7 @@ Required shape:
           "classification": "BEHAVIOR_CHANGE",
           "confidence": 0.85,
           "summary": "Rate limiting added to the /analyze endpoint; requests exceeding the limit now return HTTP 429.",
-          "doc_suggestion": "docs/products/threat-assessor/quickstart.md"
+          "doc_suggestion": "products/threat-assessor/quickstart.md"
         }
       ]
     }
@@ -230,8 +230,8 @@ Required success shape:
   "repo": "trnt-ai/trent-openclaw-security-assessment",
   "branch": "doc-agent/update-2026-04-08",
   "paths": [
-    "docs/products/openclaw-security-assessment/quickstart.md",
-    "docs/products/openclaw-security-assessment/api-reference.md"
+    "products/openclaw-security-assessment/quickstart.md",
+    "products/openclaw-security-assessment/api-reference.md"
   ],
   "pr_url": "https://github.com/trnt-ai/trent-openclaw-security-assessment/pull/16",
   "commit_sha": "abc123"
@@ -246,10 +246,10 @@ Required failure shape:
   "status": "failed",
   "timestamp": "2026-04-08T16:20:00Z",
   "step": "commit_file",
-  "failed_path": "docs/products/openclaw-security-assessment/quickstart.md",
+  "failed_path": "products/openclaw-security-assessment/quickstart.md",
   "repo": "trnt-ai/trent-openclaw-security-assessment",
   "branch": "doc-agent/update-2026-04-08",
-  "paths": ["docs/products/openclaw-security-assessment/quickstart.md"],
+  "paths": ["products/openclaw-security-assessment/quickstart.md"],
   "result": {"message": "GitHub API error"}
 }
 ```
@@ -273,6 +273,12 @@ Expected on failure:
 - `repo` string if known
 - `branch` string if known
 - `path` or `paths` if known
+
+Path semantics: `path`, `paths`, and `failed_path` are repo-relative
+paths of files that were committed (or attempted) — i.e. `doc_suggestion`
+values from classified-results with `docs.basePath` already prepended.
+Examples assume `basePath: "."` for brevity; with `basePath: "gitbook"`
+each path would be prefixed accordingly (e.g. `gitbook/products/...`).
 - `result` object and/or `error` string
 
 ## Validation rules for all readers

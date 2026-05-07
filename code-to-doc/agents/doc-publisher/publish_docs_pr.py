@@ -15,8 +15,8 @@ The manifest is a JSON file with this shape:
   "pr_body_file": "/path/to/pr-body.md",
   "run_id": "code-to-doc-2026-04-08T16:39:00Z",
   "files": [
-    {"path": "docs/products/foo/quickstart.md", "content_file": "/tmp/foo.md"},
-    {"path": "docs/products/bar/overview.md",   "content_file": "/tmp/bar.md"}
+    {"path": "products/foo/quickstart.md", "content_file": "/tmp/foo.md"},
+    {"path": "products/bar/overview.md",   "content_file": "/tmp/bar.md"}
   ]
 }
 
