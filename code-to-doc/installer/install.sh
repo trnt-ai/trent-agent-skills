@@ -62,7 +62,7 @@ source_required=(
   "$REPO_ROOT/shared/data/contracts.md"
   "$REPO_ROOT/shared/data/config.example.json"
   "$REPO_ROOT/skills/github-tools/SKILL.md"
-  "$REPO_ROOT/skills/github-tools/scripts/mint-token.js"
+  "$REPO_ROOT/skills/github-tools/scripts/mint-token.py"
   "$REPO_ROOT/skills/customer-facing/SKILL.md"
   "$REPO_ROOT/skills/doc-style/SKILL.md"
 )
@@ -418,7 +418,7 @@ required=(
   "$SKILLS_ROOT/customer-facing/SKILL.md"
   "$SKILLS_ROOT/doc-style/SKILL.md"
   "$SKILLS_ROOT/github-tools/SKILL.md"
-  "$SKILLS_ROOT/github-tools/scripts/mint-token.js"
+  "$SKILLS_ROOT/github-tools/scripts/mint-token.py"
 )
 
 for filepath in "${required[@]}"; do

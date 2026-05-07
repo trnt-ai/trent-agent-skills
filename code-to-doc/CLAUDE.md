@@ -77,8 +77,7 @@ All inter-agent data flows through `~/.openclaw/shared/data/` as JSON files:
 
 ### Languages
 - **Markdown** — agent instructions, skills, contracts (primary)
-- **Python** — helper scripts (doc-publisher's `publish_docs_pr.py`)
-- **JavaScript/Node.js** — GitHub token minting (`skills/github-tools/scripts/mint-token.js`)
+- **Python** — helper scripts (`skills/github-tools/scripts/mint-token.py`, `agents/doc-publisher/publish_docs_pr.py`)
 - **JSON** — config, contracts, pipeline outputs
 
 ### Config

@@ -70,7 +70,7 @@ Use the `github-tools` skill with:
 - `GITHUB_INSTALLATION_ID`
 - `GITHUB_APP_PRIVATE_KEY_FILE`
 
-Run the helper at `~/.openclaw/workspace/skills/github-tools/scripts/mint-token.js`, capture the installation token, and use it as `Bearer {installation_token}` for all GitHub REST API calls in this run.
+Run the helper at `~/.openclaw/workspace/skills/github-tools/scripts/mint-token.py` (`python3 <path>`), capture the installation token from stdout, and use it as `Bearer {installation_token}` for all GitHub REST API calls in this run.
 
 ### 3. Read existing docs from configured docs repo
 For each `doc_suggestion` path in classified-results:

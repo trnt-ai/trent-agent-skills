@@ -48,9 +48,11 @@ Save the returned `token` field. Use it as `Bearer {installation_token}` for all
 
 ### Script Helper
 
-A Node.js helper script is available at `scripts/mint-token.js` in this skill directory.
-Run it with: `node <skill_dir>/scripts/mint-token.js`
-It reads env vars, loads the PEM from `GITHUB_APP_PRIVATE_KEY_FILE`, and prints the installation token to stdout.
+A Python helper script is available at `scripts/mint-token.py` in this skill directory.
+Run it with: `python3 <skill_dir>/scripts/mint-token.py`
+It reads env vars, signs the JWT via `openssl` (subprocess, PEM path passed — contents stay on disk), exchanges it for an installation token via `urllib.request` with a 10-second timeout, and prints the token to stdout. Errors go to stderr, non-zero exit on any failure (including a `null` token in the response body).
+
+Stdlib only — no `pip install` step. Replaces a previous Node helper that hung indefinitely on `https.request()` on AL2023 ARM64 hosts; Python's `urllib` works fine on the same host class.
 
 ---
 

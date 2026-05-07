@@ -61,7 +61,7 @@ Use the `github-tools` skill. Mint fresh at the start of each run using:
 - `GITHUB_INSTALLATION_ID`
 - `GITHUB_APP_PRIVATE_KEY_FILE`
 
-Run the helper at `~/.openclaw/workspace/skills/github-tools/scripts/mint-token.js`, capture the installation token, and use it as `Bearer {installation_token}` for all GitHub REST API calls in this run.
+Run the helper at `~/.openclaw/workspace/skills/github-tools/scripts/mint-token.py` (`python3 <path>`), capture the installation token from stdout, and use it as `Bearer {installation_token}` for all GitHub REST API calls in this run.
 
 ### 3. Load repo list from code-to-doc config and fetch merged PRs since effective_since
 For each configured entry in `scanner.repos`:
