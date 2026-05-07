@@ -30,15 +30,21 @@ Metadata:
 Parameters:
   OpenClawModel:
     Type: String
-    Default: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
-    Description: "Bedrock model ID. Newer Anthropic Claude (3.x+, 4.x+) REQUIRE an inference profile (prefix global./us./eu./apac.) — bare foundation IDs fail with 'on-demand throughput isn't supported'. Older models (Nova-Lite, Titan, Llama, Mistral, etc.) accept bare IDs. Default uses EU profile for data residency in eu-west-1; switch to global.* for cross-region capacity routing."
+    Default: "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    Description: "Bedrock model ID. Newer Anthropic Claude (3.x+, 4.x+) REQUIRE an inference profile (prefix global./us./eu./apac.) — bare foundation IDs fail with 'on-demand throughput isn't supported'. Older models (Nova-Lite, Titan, Llama, Mistral, etc.) accept bare IDs. Default is global.* which routes across all regions and works from any deployment region. Override to eu.* / us.* / apac.* for data-residency requirements that constrain traffic to a specific geography."
     AllowedValues:
       # Anthropic Claude — REQUIRE inference profile (no on-demand bare-ID support).
-      # eu.* keeps traffic in EU regions; global.* enables cross-region routing.
+      # eu.*  keeps traffic in EU regions.
+      # us.*  keeps traffic in US regions (us-east-1, us-east-2, us-west-2).
+      # global.*  enables cross-region capacity routing.
       - "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
       - "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
       - "eu.anthropic.claude-opus-4-5-20251101-v1:0"
       - "eu.anthropic.claude-sonnet-4-20250514-v1:0"
+      - "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      - "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+      - "us.anthropic.claude-opus-4-5-20251101-v1:0"
+      - "us.anthropic.claude-sonnet-4-20250514-v1:0"
       - "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
       - "global.anthropic.claude-haiku-4-5-20251001-v1:0"
       - "global.anthropic.claude-opus-4-5-20251101-v1:0"
