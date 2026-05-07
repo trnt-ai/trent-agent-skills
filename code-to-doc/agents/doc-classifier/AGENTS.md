@@ -79,7 +79,7 @@ Write `~/.openclaw/shared/data/classified-results.json`:
           "classification": "BEHAVIOR_CHANGE",
           "confidence": 0.85,
           "summary": "Rate limiting added to the /analyze endpoint; requests exceeding the limit now return HTTP 429.",
-          "doc_suggestion": "docs/products/threat-assessor/quickstart.md"
+          "doc_suggestion": "products/threat-assessor/quickstart.md"
         }
       ]
     }

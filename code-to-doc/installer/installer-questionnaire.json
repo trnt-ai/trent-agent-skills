@@ -66,7 +66,7 @@
         {
           "key": "docs_base_path",
           "type": "string",
-          "label": "Docs base path",
+          "label": "Docs base path (subdir within docs repo; use \".\" for repo root, e.g. \"gitbook\" for the trnt-ai/sdks GitBook)",
           "required": true,
           "default": "."
         },
