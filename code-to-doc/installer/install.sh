@@ -29,7 +29,11 @@ CONFIG_PATH="$OPENCLAW_ROOT/openclaw.json"
 AGENTS_ROOT="$OPENCLAW_ROOT/agents"
 WORKSPACES_ROOT="$OPENCLAW_ROOT/workspace"
 SHARED_ROOT="$OPENCLAW_ROOT/shared/data"
-SKILLS_ROOT="$WORKSPACES_ROOT/skills"
+# Skills must live at ~/.openclaw/skills/ — OpenClaw's documented "Managed/local"
+# discovery location (priority 4 of 6, see https://docs.openclaw.ai/skills).
+# A previous "skills under workspace/" change broke discovery: ~/.openclaw/workspace/skills/
+# is NOT one of the 6 search locations, so agents could not resolve skills by name.
+SKILLS_ROOT="$OPENCLAW_ROOT/skills"
 
 # --- helpers ---
 
