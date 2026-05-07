@@ -1335,13 +1335,19 @@ Resources:
                     sleep 5
                   fi
 
-                  # Enable messaging channels
+                  # Enable messaging channels.
+                  # WhatsApp is intentionally excluded — its dep tree pulls a
+                  # git-tarball from codeload.github.com (libsignal-node) that
+                  # periodically returns read ETIMEDOUT from EC2 NAT egress and
+                  # exceeds the CFN UserData window (npm retries the failing
+                  # fetch 3x at 5min/each before giving up). Re-enable manually
+                  # post-deploy if needed:
+                  #   source ~/.nvm/nvm.sh && openclaw plugins enable whatsapp
                   echo "[8.5/9] Enabling messaging channels..."
                   sudo -H -u ec2-user bash -c '
                   export HOME=/home/ec2-user
                   export NVM_DIR="$HOME/.nvm"
                   [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-                  openclaw plugins enable whatsapp || echo "WhatsApp plugin enable failed"
                   openclaw plugins enable telegram || echo "Telegram plugin enable failed"
                   openclaw plugins enable discord || echo "Discord plugin enable failed"
                   openclaw plugins enable slack || echo "Slack plugin enable failed"
