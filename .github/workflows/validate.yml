@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   validate:
-    name: Validate skills
+    name: Validate scripts and config
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
