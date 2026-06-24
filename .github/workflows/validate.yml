@@ -1,0 +1,84 @@
+# Pre-merge validation for the agent-skills monorepo.
+#
+# Validates the executable surface of the skills before they merge:
+#   - shell installers are free of shellcheck errors,
+#   - JSON config files parse,
+#   - Python helper scripts compile,
+#   - every skill directory ships a SKILL.md.
+#
+# Uses only the GitHub-owned, SHA-pinned actions/checkout plus tools preinstalled
+# on ubuntu-latest (shellcheck, python3) — no third-party actions.
+name: Validate
+
+# pull_request (NOT pull_request_target): fork PRs run with a read-only token and
+# no secret access. We only do static validation of the checked-out PR head.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate skills
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Skip files >1MB so an oversized PR can't exhaust the runner.
+      - name: ShellCheck installers
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          for f in **/*.sh; do
+            if [ "$(stat -c%s "$f")" -gt 1048576 ]; then
+              echo "skip $f (too large)"; continue
+            fi
+            echo "shellcheck $f"
+            timeout 30s shellcheck --severity=error "$f"
+          done
+
+      - name: Validate JSON
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          for f in **/*.json; do
+            if [ "$(stat -c%s "$f")" -gt 1048576 ]; then
+              echo "skip $f (too large)"; continue
+            fi
+            echo "json $f"
+            timeout 30s python3 -m json.tool "$f" > /dev/null
+          done
+
+      # py_compile parses/byte-compiles only; it does not import or execute the code.
+      - name: Compile Python
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          for f in **/*.py; do
+            if [ "$(stat -c%s "$f")" -gt 1048576 ]; then
+              echo "skip $f (too large)"; continue
+            fi
+            echo "py_compile $f"
+            timeout 30s python3 -m py_compile "$f"
+          done
+
+      - name: Check skill structure
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          missing=0
+          for d in code-to-doc/skills/*/; do
+            if [ ! -f "${d}SKILL.md" ]; then
+              echo "::error::${d} is missing SKILL.md"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          echo "all skill directories contain SKILL.md"
