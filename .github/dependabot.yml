@@ -1,0 +1,31 @@
+# Dependabot config — github-actions ecosystem only: this repo carries no
+# package manifests (skills are markdown + scripts), so actions SHA-pin
+# freshness is the only version-update surface.
+# Cooldown per the Dependency Security Program policy (github-actions
+# supports only default-days). Security updates bypass cooldown natively.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    cooldown:
+      default-days: 7
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    groups:
+      github-actions:
+        patterns:
+          - "actions/*"
+          - "github/*"
+      third-party-actions:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "actions/*"
+          - "github/*"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
