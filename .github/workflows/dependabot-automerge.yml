@@ -44,7 +44,7 @@ on:
 permissions: {}
 
 env:
-  DRY_RUN: "true"
+  DRY_RUN: "false"
   # Team that reviews Dependabot PRs the machine path won't handle.
   # Must have at least Triage access to each participating repo, or the
   # review request is rejected by GitHub.
